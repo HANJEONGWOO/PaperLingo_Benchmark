@@ -4,7 +4,6 @@ import httpx
 import pytest
 
 from paperlingo.judge import JudgeConfig, _response_identity, judge_item, quality_from_review, strict_json_loads
-from scripts.example_generator import locate, to_prediction
 
 
 @pytest.fixture
@@ -306,45 +305,3 @@ def test_response_identity_is_bounded_and_restricted():
 def test_no_credentials_in_endpoint(url):
     with pytest.raises(ValueError):
         JudgeConfig(url, "key", "model")
-
-
-def test_generator_resolves_unicode_and_repeated_text():
-    abstract = "α text. It depends on time. It depends on time."
-    paper = {"paper_id": "p1", "abstract": abstract}
-    generated = {"paper_id": "p1", "questions": [{
-        "question_id": "q1", "expression_text": "depends on", "expression_type": "preposition_pattern",
-        "context_id": "c3", "blank_text": "on",
-        "expression_occurrence": 0, "blank_occurrence": 0,
-        "options": [{"id": option_id, "text": text} for option_id, text in zip("ABCD", ["on", "at", "for", "to"])],
-        "answer_id": "A", "learning_point": "depend on의 전치사",
-    }]}
-    output = to_prediction(paper, generated)
-    question = output["questions"][0]
-    start, end = question["expression_span"].values()
-    assert abstract[start:end] == "depends on"
-    assert start == abstract.rindex("depends on")
-    start, end = question["blank_span"].values()
-    assert abstract[start:end] == "on"
-    assert "context_text" not in question
-
-
-def test_generator_rejects_invented_or_ambiguous_occurrence():
-    with pytest.raises(ValueError):
-        locate("depends on", "depend on", 0, "expression_text")
-    with pytest.raises(ValueError):
-        locate("depends on", "depends on", 1, "expression_text")
-    with pytest.raises(ValueError):
-        locate("depends on", "depends on", True, "expression_text")
-
-
-@pytest.mark.parametrize("duplicate", ["on", "ON", " on ", "ｏｎ"])
-def test_generator_rejects_duplicate_option_texts(duplicate):
-    paper = {"paper_id": "p1", "abstract": "The outcome depends on the method."}
-    generated = {"paper_id": "p1", "questions": [{
-        "question_id": "q1", "expression_text": "depends on", "expression_type": "preposition_pattern",
-        "context_id": "c1", "blank_text": "on", "expression_occurrence": 0, "blank_occurrence": 0,
-        "options": [{"id": option_id, "text": text} for option_id, text in zip("ABCD", ["on", duplicate, "for", "to"])],
-        "answer_id": "A", "learning_point": "전치사 on",
-    }]}
-    with pytest.raises(ValueError, match="distinct"):
-        to_prediction(paper, generated)

@@ -11,6 +11,7 @@ import math
 import unicodedata
 
 from .dataset import Dataset, domain_code, occurrences, word_boundary
+from .submission import COMPACT_FIELDS, INFERENCE_POLICY, generated_question_id, normalize_question, question_format
 
 
 METRICS_VERSION = "exact-prq-v1"
@@ -90,10 +91,16 @@ def _fatal_validation(dataset: Dataset, predictions: list[dict], paper_ids: list
             if not isinstance(question, dict):
                 errors.append(f"{label}: 문항은 객체여야 합니다.")
                 continue
-            extra = set(question) - QUESTION_FIELDS
+            input_format = question_format(question)
+            allowed_fields = COMPACT_FIELDS if input_format == "compact-v1" else QUESTION_FIELDS
+            extra = set(question) - allowed_fields
             if extra:
                 errors.append(f"{label}: 허용하지 않는 필드 {', '.join(sorted(map(str, extra)))}")
-            question_id = question.get("question_id")
+            question_id = (
+                generated_question_id(paper_id, position)
+                if input_format == "compact-v1" and isinstance(paper_id, str)
+                else question.get("question_id")
+            )
             if not isinstance(question_id, str) or not question_id.strip() or len(question_id) > 200:
                 errors.append(f"{label}: question_id는 1~200자의 문자열이어야 합니다.")
             else:
@@ -107,9 +114,9 @@ def _fatal_validation(dataset: Dataset, predictions: list[dict], paper_ids: list
         raise SubmissionError(errors[:100])
 
 
-def _validate_item(question: dict, abstract: str, *, duplicate: bool) -> dict:
+def _validate_item(question: dict, abstract: str, *, duplicate: bool, initial_issues: list[dict] | None = None) -> dict:
     item = deepcopy(question)
-    issues = []
+    issues = deepcopy(initial_issues or [])
 
     def issue(code: str, message: str) -> None:
         issues.append({"code": code, "message": message})
@@ -210,17 +217,20 @@ def evaluate(dataset: Dataset, predictions: list[dict], paper_ids: list[str], sc
         "metrics": {},
         "papers": [],
     }
+    formats = set()
     for paper_id in paper_ids:
         paper = dataset.papers[paper_id]
         gold = [expression["text"] for expression in dataset.labels[paper_id]]
         remaining = set(gold)
         seen = set()
         items = []
-        for question in predictions_by_id.get(paper_id, {}).get("questions", []):
+        for position, raw_question in enumerate(predictions_by_id.get(paper_id, {}).get("questions", [])):
+            question, normalization_issues = normalize_question(raw_question, paper["abstract"], paper_id, position)
+            formats.add(question["input_format"])
             text = question["expression_text"]
             duplicate = text in seen
             seen.add(text)
-            item = _validate_item(question, paper["abstract"], duplicate=duplicate)
+            item = _validate_item(question, paper["abstract"], duplicate=duplicate, initial_issues=normalization_issues)
             # A bad span or option does not undo a correct expression selection.
             item["matched"] = bool(not duplicate and text in remaining and occurrences(paper["abstract"], text, whole_words=True))
             if item["matched"]:
@@ -236,6 +246,9 @@ def evaluate(dataset: Dataset, predictions: list[dict], paper_ids: list[str], sc
             "missing_expressions": [text for text in gold if text in remaining],
             "items": items,
         })
+    report["submission_formats"] = sorted(formats)
+    if "compact-v1" in formats:
+        report["inference_policy"] = deepcopy(INFERENCE_POLICY)
     return recompute(report)
 
 

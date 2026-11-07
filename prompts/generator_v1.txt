@@ -9,52 +9,44 @@ specialist terminology, numbers, trivial function words, duplicate learning poin
 and ungrammatical source expressions. New advanced vocabulary may be useful if
 understandable from context. Choose fewer than five when appropriate.
 An expression is a reusable WORD OR SHORT PHRASE, usually 1–8 words. It is NOT
-the entire sentence or a list of scientific entities. The source context provides
-the sentence separately. Select the smallest phrase that preserves its learning point.
+the entire sentence or a list of scientific entities. Select the smallest phrase
+that preserves its learning point.
 
 For each expression, create one four-option fill-in-the-blank question. The blank
-may be the whole expression or one continuous part of it. The input supplies exact
-source contexts with IDs. Choose the ID of a context containing the expression;
-do not copy or rewrite the context. Choose "abstract" when more context is needed.
-Expression and blank strings must preserve capitalization, punctuation and spelling.
-The correct option text must exactly equal blank_text. Three distractors must be
+may be the whole expression or one continuous part of it. The server finds the
+FIRST exact whole-word occurrence of expression_text in the abstract, then blanks
+the FIRST exact whole-word occurrence of options[answer_id] within that expression.
+The surrounding sentence is supplied to learners automatically. Choose a question
+that works in that first occurrence and its sentence. Do not write a context or
+character offsets. Never select a fragment from inside a word, such as "on" from
+"condition". Expression and correct option strings must preserve capitalization,
+punctuation and spelling from the source exactly. Three distractors must be
 plausible learner confusions but clearly wrong in the visible context. Check every
 alternative for ambiguity: synonyms or another preposition can also be acceptable.
 Do not rely on outside scientific knowledge, author's phrasing, or source memory.
 Grammar errors can be suitable distractors when grammar is the learning target.
-Randomize the answer among A, B, C, D; keep formatting comparable across options.
+Vary the correct option's position among indexes 0, 1, 2, 3; keep formatting comparable.
 All FOUR option texts must be DIFFERENT from one another. Never copy the answer
 into the distractors. Changing only capitalization or whitespace is not a new option.
 Prefer a short blank (usually 1–3 words), with short comparable alternatives.
 
-Do not estimate character offsets. The client calculates them by locating exact
-substrings inside the chosen source context. If a quoted string occurs multiple
-times, use the zero-based occurrence index: expression_occurrence within the chosen
-context; blank_occurrence within expression_text. Use 0 for its first occurrence.
-
 Return exactly one JSON object with paper_id (copied from input) and questions array.
 Every question must have exactly these fields:
-question_id: unique string such as "q1"
 expression_text: exact continuous expression from abstract
-expression_type: one of academic_vocabulary, collocation, verb_pattern,
-  preposition_pattern, discourse_marker, rhetorical_frame, grammar_pattern
-context_id: one of the context IDs supplied with the input
-blank_text: exact substring of expression_text to replace
-expression_occurrence: nonnegative integer
-blank_occurrence: nonnegative integer
-options: array of four objects {"id": "A", "text": "..."}, with IDs A/B/C/D once each
-answer_id: ID of the one correct option
-learning_point: short Korean explanation of the specific linguistic learning point
+options: array of exactly four different nonempty strings
+answer_id: integer index of the correct option, 0 through 3 (not a letter or boolean)
+The correct option must be an exact whole-word substring of expression_text.
 
 Short worked example for FORMAT AND PHRASE GRANULARITY only:
 Example input:
-{"paper_id":"example","abstract":"The outcome depends on the method.","contexts":[{"id":"c1","text":"The outcome depends on the method."}]}
+{"paper_id":"example","abstract":"The outcome depends on the method."}
 Example output:
-{"paper_id":"example","questions":[{"question_id":"q1","expression_text":"depends on","expression_type":"preposition_pattern","context_id":"c1","blank_text":"on","expression_occurrence":0,"blank_occurrence":0,"options":[{"id":"A","text":"at"},{"id":"B","text":"on"},{"id":"C","text":"to"},{"id":"D","text":"for"}],"answer_id":"B","learning_point":"depend와 결합하는 전치사 on을 익힌다."}]}
+{"paper_id":"example","questions":[{"expression_text":"depends on","options":["at","on","to","for"],"answer_id":1}]}
 Here expression_text is "depends on", NOT "The outcome depends on the method.".
-The four alternatives at/on/to/for are all distinct. Only "on" fits this context.
+The four alternatives at/on/to/for are all distinct. Index 1 selects "on", producing
+"The outcome depends [BLANK] the method." Only "on" fits this context.
 Apply this approach to the ACTUAL user abstract. Do not copy the example paper ID,
-expression, context ID, or options unless they independently fit the actual input.
+expression or options unless they independently fit the actual input.
 
 If no appropriate expression is available, return {"paper_id": "input ID", "questions": []}.
 Return JSON only, without Markdown, labels, grading, explanations outside the schema,

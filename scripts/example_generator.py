@@ -19,7 +19,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import re
 import sys
 import time
 import unicodedata
@@ -29,41 +28,16 @@ import httpx
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from paperlingo.judge import JudgeConfig, _json_format_unsupported, _response_identity, _usage, strict_json_loads  # noqa: E402
-
-
-EXPRESSION_TYPES = {
-    "academic_vocabulary", "collocation", "verb_pattern", "preposition_pattern",
-    "discourse_marker", "rhetorical_frame", "grammar_pattern",
-}
-
-
-def source_contexts(paper: dict) -> list[dict]:
-    """Provide exact source contexts with stable IDs; the model never rewrites them."""
-    abstract = paper["abstract"]
-    boundaries = list(re.finditer(r"(?<=[.!?])\s+(?=[A-Z])", abstract))
-    starts = [0] + [match.end() for match in boundaries]
-    ends = [match.start() for match in boundaries] + [len(abstract)]
-    contexts = [
-        {"id": f"c{index + 1}", "text": abstract[start:end], "start": start, "end": end}
-        for index, (start, end) in enumerate(zip(starts, ends)) if abstract[start:end].strip()
-    ]
-    contexts.append({"id": "abstract", "text": abstract, "start": 0, "end": len(abstract)})
-    return contexts
-
-
-def locate(text: str, fragment: str, occurrence: int, field: str) -> tuple[int, int]:
-    if not isinstance(fragment, str) or not fragment or type(occurrence) is not int or occurrence < 0:
-        raise ValueError(f"Invalid {field} substring or occurrence index.")
-    position = -1
-    for _ in range(occurrence + 1):
-        position = text.find(fragment, position + 1)
-        if position < 0:
-            raise ValueError(f"{field} is not an exact source substring at the requested occurrence.")
-    return position, position + len(fragment)
+from paperlingo.dataset import occurrences  # noqa: E402
 
 
 def to_prediction(paper: dict, generated: dict) -> dict:
-    """Resolve source offsets by code, without changing generated content."""
+    """Validate compact prediction fields without repairing generated content.
+
+    The scoring server derives the first matching source span and sentence.
+    This client only confirms that both the expression and correct option occur
+    verbatim at whole-word boundaries; it never reads reference labels.
+    """
     if not isinstance(generated, dict) or set(generated) != {"paper_id", "questions"}:
         raise ValueError("Generator response must contain paper_id and questions only.")
     if generated["paper_id"] != paper["paper_id"]:
@@ -71,67 +45,36 @@ def to_prediction(paper: dict, generated: dict) -> dict:
     questions = generated["questions"]
     if not isinstance(questions, list) or len(questions) > 5:
         raise ValueError("Generator must return 0–5 questions.")
-    required = {
-        "question_id", "expression_text", "expression_type", "context_id", "blank_text",
-        "expression_occurrence", "blank_occurrence", "options",
-        "answer_id", "learning_point",
-    }
+    required = {"expression_text", "options", "answer_id"}
     converted = []
-    question_ids = set()
-    contexts = {context["id"]: context for context in source_contexts(paper)}
     for question in questions:
         if not isinstance(question, dict) or set(question) != required:
             raise ValueError("Generated question fields do not match the generator schema.")
-        question_id = question["question_id"]
-        if not isinstance(question_id, str) or not question_id.strip() or question_id in question_ids:
-            raise ValueError("Question IDs must be nonempty and unique.")
-        question_ids.add(question_id)
-        if not isinstance(question["expression_type"], str) or question["expression_type"] not in EXPRESSION_TYPES:
-            raise ValueError("Unknown expression_type.")
-        if not isinstance(question["learning_point"], str) or not question["learning_point"].strip():
-            raise ValueError("learning_point must be a nonempty string.")
-        context_id = question["context_id"]
-        if not isinstance(context_id, str) or context_id not in contexts:
-            raise ValueError("context_id must refer to a supplied source context.")
-        context = contexts[context_id]
-        context_start, context_end = context["start"], context["end"]
-        expression_start, expression_end = locate(
-            context["text"], question["expression_text"], question["expression_occurrence"], "expression_text"
-        )
-        blank_start, blank_end = locate(
-            question["expression_text"], question["blank_text"], question["blank_occurrence"], "blank_text"
-        )
+        expression = question["expression_text"]
+        if not isinstance(expression, str) or not expression.strip() or len(expression) > 1000:
+            raise ValueError("expression_text must be a nonempty string of at most 1000 characters.")
+        if not occurrences(paper["abstract"], expression, whole_words=True):
+            raise ValueError("expression_text must occur exactly in the abstract at whole-word boundaries.")
         options = question["options"]
         if not isinstance(options, list) or len(options) != 4:
             raise ValueError("Exactly four options are required.")
-        by_id = {}
         normalized_options = set()
         for option in options:
-            if not isinstance(option, dict) or set(option) != {"id", "text"}:
-                raise ValueError("Option fields must be id and text.")
-            if not isinstance(option["id"], str) or option["id"] not in {"A", "B", "C", "D"} or option["id"] in by_id:
-                raise ValueError("Option IDs must be A/B/C/D exactly once.")
-            if not isinstance(option["text"], str) or not option["text"].strip():
-                raise ValueError("Option text must be a nonempty string.")
-            normalized = " ".join(unicodedata.normalize("NFKC", option["text"]).casefold().split())
+            if not isinstance(option, str) or not option.strip() or len(option) > 1000:
+                raise ValueError("Each option must be a nonempty string of at most 1000 characters.")
+            normalized = " ".join(unicodedata.normalize("NFKC", option).casefold().split())
             if normalized in normalized_options:
                 raise ValueError("Four option texts must be distinct, including after case/spacing/Unicode normalization.")
             normalized_options.add(normalized)
-            by_id[option["id"]] = option["text"]
         answer_id = question["answer_id"]
-        if not isinstance(answer_id, str) or answer_id not in by_id or by_id[answer_id] != question["blank_text"]:
-            raise ValueError("Correct option must exactly restore the original blank.")
-        absolute_expression = context_start + expression_start
+        if type(answer_id) is not int or not 0 <= answer_id <= 3:
+            raise ValueError("answer_id must be an integer index from 0 to 3, not a boolean.")
+        if not occurrences(expression, options[answer_id], whole_words=True):
+            raise ValueError("Correct option must occur exactly within expression_text at whole-word boundaries.")
         converted.append({
-            "question_id": question_id,
-            "expression_text": question["expression_text"],
-            "expression_type": question["expression_type"],
-            "expression_span": {"start": absolute_expression, "end": context_start + expression_end},
-            "context_span": {"start": context_start, "end": context_end},
-            "blank_span": {"start": absolute_expression + blank_start, "end": absolute_expression + blank_end},
-            "options": options,
+            "expression_text": expression,
+            "options": list(options),
             "answer_id": answer_id,
-            "learning_point": question["learning_point"],
         })
     return {"paper_id": paper["paper_id"], "questions": converted}
 
@@ -176,15 +119,11 @@ async def run(args: argparse.Namespace) -> None:
     async with httpx.AsyncClient(timeout=config.timeout, follow_redirects=False) as client:
         for paper in papers:
             start = time.monotonic()
-            model_input = {
-                **paper,
-                "contexts": [{"id": context["id"], "text": context["text"]} for context in source_contexts(paper)],
-            }
             body = {
                 "model": config.model,
                 "messages": [
                     {"role": "system", "content": prompt},
-                    {"role": "user", "content": json.dumps(model_input, ensure_ascii=False)},
+                    {"role": "user", "content": json.dumps(paper, ensure_ascii=False)},
                 ],
                 "response_format": {"type": "json_object"},
             }

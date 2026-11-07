@@ -210,7 +210,7 @@ class Dataset:
         offset, limit = max(0, offset), min(100, max(1, limit))
         return {"items": records[offset:offset + limit], "total": len(records)}
 
-    def demo_predictions(self) -> list[dict]:
+    def demo_predictions(self, *, compact: bool = False) -> list[dict]:
         """Authored format examples, never claimed as measured model output."""
         predictions = []
         for index, paper_id in enumerate(self.splits["demo"]):
@@ -226,6 +226,15 @@ class Dataset:
                     invalid["options"][1]["text"] = invalid["options"][0]["text"]
                     questions.append(invalid)
             predictions.append({"paper_id": paper_id, "questions": questions})
+        if compact:
+            return [{"paper_id": paper["paper_id"], "questions": [
+                {
+                    "expression_text": question["expression_text"],
+                    "options": [option["text"] for option in question["options"]],
+                    "answer_id": next(index for index, option in enumerate(question["options"]) if option["id"] == question["answer_id"]),
+                }
+                for question in paper["questions"]
+            ]} for paper in predictions]
         return predictions
 
     def _example_question(self, paper_id: str, expression: dict, suffix: str) -> dict:

@@ -44,6 +44,65 @@ def test_dataset_and_sample_are_real(client):
     assert all("questions" in json.loads(line) for line in sample.text.splitlines())
 
 
+def test_downloaded_compact_sample_is_the_public_contract(client):
+    downloaded = client.get("/api/sample?download=1")
+    predictions = [json.loads(line) for line in downloaded.text.splitlines()]
+    schema = client.get("/api/schema").json()
+    assert schema["required_question_fields"] == ["expression_text", "options", "answer_id"]
+    assert schema["question_fields"]["answer_id"]["minimum"] == 0
+    assert schema["question_fields"]["answer_id"]["maximum"] == 3
+    for paper in predictions:
+        for question in paper["questions"]:
+            assert set(question) == {"expression_text", "options", "answer_id"}
+            assert all(isinstance(option, str) for option in question["options"])
+            assert type(question["answer_id"]) is int
+    created = client.post("/api/runs", headers=HEADERS, json={"name": "간소화 예제", "scope": "demo", "predictions": downloaded.text})
+    assert created.status_code == 201, created.text
+    run = created.json()
+    assert run["is_demo"] is True
+    assert run["report"]["counts"]["matched"] == 3
+    item = run["report"]["papers"][0]["items"][0]
+    assert item["structure_valid"] is True
+    assert item["question_id"]
+    assert "identical [BLANK]" in item["context"]
+
+
+def test_compact_nonfirst_answer_supports_review_and_export(client):
+    predictions = client.get("/api/sample").json()["predictions"]
+    question = predictions[0]["questions"][0]
+    question["options"] = ["with", "of", "to", "for"]
+    question["answer_id"] = 2
+    paper_id = predictions[0]["paper_id"]
+    created = client.post("/api/runs", headers=HEADERS, json={"name": "세 번째 정답", "scope": "custom", "paper_ids": [paper_id], "predictions": [{"paper_id": paper_id, "questions": [question]}]})
+    assert created.status_code == 201, created.text
+    run = created.json()
+    paper = run["report"]["papers"][0]
+    item = paper["items"][0]
+    assert item["answer_id"] == "C"
+    assert item["options"][2] == {"id": "C", "text": "to"}
+    reviewed = client.post(f'/api/runs/{run["id"]}/reviews', headers=HEADERS, json=review_payload(paper, item))
+    assert reviewed.status_code == 200, reviewed.text
+    assert reviewed.json()["status"] == "complete"
+    exported = client.get(f'/api/runs/{run["id"]}/export').json()
+    assert exported["review_history"][0]["quality"]["accepted_option_ids"] == ["C"]
+    assert exported["report"]["metrics"]["quality_all_pct"] == 100
+
+
+def test_legacy_upload_and_saved_record_remain_reviewable(client):
+    from paperlingo.dataset import Dataset
+    dataset = Dataset(ROOT / "data")
+    created = client.post("/api/runs", headers=HEADERS, json={"name": "이전 형식", "scope": "demo", "predictions": dataset.demo_predictions()})
+    assert created.status_code == 201, created.text
+    run = created.json()
+    assert run["is_demo"] is True
+    paper = run["report"]["papers"][0]
+    item = paper["items"][0]
+    assert item["question_id"] == "demo-0911.3369-valid"
+    result = client.post(f'/api/runs/{run["id"]}/reviews', headers=HEADERS, json=review_payload(paper, item))
+    assert result.status_code == 200
+    assert client.get(f'/api/runs/{run["id"]}').json()["report"]["papers"][0]["items"][0]["quality"]["source"] == "human"
+
+
 def test_review_end_to_end_and_audit_export(client):
     run = create_demo(client)
     assert run["status"] == "awaiting_review"

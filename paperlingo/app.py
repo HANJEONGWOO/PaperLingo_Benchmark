@@ -28,7 +28,7 @@ from .judge import JudgeConfig, judge_item, quality_from_review
 from .scoring import SubmissionError, evaluate, recompute
 from .storage import Store, now, report_status
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 COOKIE = "paperlingo_session"
 
 
@@ -56,9 +56,15 @@ def validate_json_tree(value):
         if isinstance(obj, float) and not math.isfinite(obj):
             raise ValueError("유한하지 않은 숫자는 사용할 수 없습니다.")
         if isinstance(obj, dict):
+            pending.extend((key, depth + 1) for key in obj)
             pending.extend((v, depth + 1) for v in obj.values())
         elif isinstance(obj, list):
             pending.extend((v, depth + 1) for v in obj)
+        elif isinstance(obj, str):
+            try:
+                obj.encode("utf-8")
+            except UnicodeEncodeError:
+                raise ValueError("JSON 문자열에 유효하지 않은 유니코드 문자가 있습니다.") from None
 
 
 class LoginInput(BaseModel):
@@ -291,7 +297,7 @@ def create_app(settings: Settings | None = None):
     @app.get("/api/sample")
     def sample(request: Request, download: bool = False):
         need_read(request)
-        predictions = dataset.demo_predictions()
+        predictions = dataset.demo_predictions(compact=True)
         if download:
             content = "\n".join(json.dumps(p, ensure_ascii=False) for p in predictions) + "\n"
             return Response(content, media_type="application/x-ndjson", headers={"Content-Disposition": 'attachment; filename="paperlingo-format-example.jsonl"'})
@@ -300,7 +306,23 @@ def create_app(settings: Settings | None = None):
     @app.get("/api/schema")
     def schema(request: Request):
         need_read(request)
-        return {"version": VERSION, "input": "논문별 객체의 JSON 배열 또는 JSONL", "max_questions_per_paper": 5, "span_convention": "abstract 기준 Python 유니코드 문자, 0부터 시작, end 제외", "required_paper_fields": ["paper_id", "questions"], "required_question_fields": ["question_id", "expression_text", "expression_span", "context_span", "blank_span", "options", "answer_id"], "option_ids": ["A", "B", "C", "D"], "sample": dataset.demo_predictions()[0]}
+        return {
+            "version": VERSION,
+            "submission_format": "compact-v1",
+            "input": "논문별 객체의 JSON 배열 또는 JSONL",
+            "max_questions_per_paper": 5,
+            "required_paper_fields": ["paper_id", "questions"],
+            "required_question_fields": ["expression_text", "options", "answer_id"],
+            "question_fields": {
+                "expression_text": {"type": "string", "description": "원본 abstract에 있는 학습 표현 전체"},
+                "options": {"type": "array", "items": "string", "length": 4, "description": "서로 다른 보기 문자열 4개"},
+                "answer_id": {"type": "integer", "minimum": 0, "maximum": 3, "description": "options 배열의 정답 인덱스. 0은 첫 번째 보기이며 문자열과 boolean은 허용하지 않음"},
+            },
+            "context_rule": "원문에서 expression_text가 온전한 단어로 처음 등장하는 위치를 사용합니다. 표현 안에서 options[answer_id]가 온전한 단어로 처음 등장하는 부분을 빈칸으로 만들고, 표현 전체를 포함하는 원문 문맥을 자동 추출합니다.",
+            "server_generated": ["question_id", "expression_span", "context_span", "blank_span"],
+            "legacy_supported": True,
+            "sample": dataset.demo_predictions(compact=True)[0],
+        }
 
     @app.get("/api/runs")
     def runs(request: Request):
@@ -337,7 +359,7 @@ def create_app(settings: Settings | None = None):
         async with write_lock:
             if store.count() >= cfg.max_runs:
                 raise HTTPException(409, "평가 기록 저장 한도에 도달했습니다. 관리자가 백업 후 저장소를 정리해야 합니다.")
-            return store.create(body.name.strip(), report, predictions == dataset.demo_predictions())
+            return store.create(body.name.strip(), report, predictions == dataset.demo_predictions(compact=True) or predictions == dataset.demo_predictions())
 
     @app.get("/api/runs/{run_id}")
     def run_detail(run_id: str, request: Request):

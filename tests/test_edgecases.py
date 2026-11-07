@@ -35,7 +35,7 @@ def test_paper_ids_containing_slash_are_accessible(client):
 def test_nonfinite_payload_is_rejected_before_persistence(client, constant, string_payload):
     http, app = client
     predictions = http.get("/api/sample").json()["predictions"]
-    predictions[0]["questions"][0]["blank_span"]["start"] = constant
+    predictions[0]["questions"][0]["answer_id"] = constant
     if string_payload:
         predictions = json.dumps(predictions)
     body = {"name": "invalid numeric JSON", "scope": "demo", "predictions": predictions}
@@ -57,7 +57,7 @@ def test_nonfinite_validation_error_does_not_break_error_response(client):
 def test_numeric_overflow_is_rejected_without_nonstandard_json_constants(client, string_payload):
     http, app = client
     predictions = http.get("/api/sample").json()["predictions"]
-    predictions[0]["questions"][0]["blank_span"]["start"] = "OVERFLOW_NUMBER"
+    predictions[0]["questions"][0]["answer_id"] = "OVERFLOW_NUMBER"
     serialized = json.dumps(predictions).replace('"OVERFLOW_NUMBER"', "1e400")
     if string_payload:
         body = json.dumps({"name": "overflow", "scope": "demo", "predictions": serialized})
@@ -73,6 +73,26 @@ def test_duplicate_json_keys_do_not_silently_overwrite_submission(client):
     body = '{"name":"first","name":"overwritten","scope":"demo","predictions":[]}'
     response = http.post("/api/runs", headers=HEADERS, content=body)
     assert 400 <= response.status_code < 500
+    assert app.state.store.count() == 0
+
+
+@pytest.mark.parametrize("field", ["paper_id", "expression_text", "option", "key", "name"])
+def test_unpaired_unicode_surrogate_is_rejected_before_storage(client, field):
+    http, app = client
+    predictions = http.get("/api/sample").json()["predictions"]
+    body = {"name": "unicode input", "scope": "demo", "predictions": predictions}
+    if field == "paper_id":
+        predictions[0]["paper_id"] = "invalid-\ud800"
+    elif field == "expression_text":
+        predictions[0]["questions"][0]["expression_text"] = "\ud800"
+    elif field == "option":
+        predictions[0]["questions"][0]["options"][0] = "\ud800"
+    elif field == "key":
+        predictions[0]["questions"][0]["\ud800"] = "invalid key"
+    else:
+        body["name"] = "\ud800"
+    response = http.post("/api/runs", headers=HEADERS, content=json.dumps(body))
+    assert response.status_code == 422, response.text
     assert app.state.store.count() == 0
 
 

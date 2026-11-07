@@ -277,14 +277,15 @@ function renderPapers() {
 }
 function contextNode(context) {
   const block = node("blockquote", "question-context");
-  const parts = String(context || "문맥을 구성할 수 없습니다. 위치 정보를 확인하세요.").split("[BLANK]");
+  const parts = String(context || "문맥을 구성할 수 없습니다. 학습 표현이 원문에 있고 정답 보기가 표현에 포함되는지 확인하세요.").split("[BLANK]");
   parts.forEach((part, index) => { if (index) block.append(node("span", "blank-marker", "_______")); block.append(document.createTextNode(part)); });
   return block;
 }
 function renderQuestion(paper, item) {
   const card = node("article", "question-card");
   const heading = node("div", "question-heading"), title = node("div");
-  title.append(node("span", "question-ident", `${item.question_id}${item.expression_type ? ` · ${item.expression_type}` : ""}`), node("h3", "question-title", item.expression_text));
+  const questionLabel = item.input_format === "compact-v1" ? `문항 ${item.inference.question_position}` : `${item.question_id}${item.expression_type ? ` · ${item.expression_type}` : ""}`;
+  title.append(node("span", "question-ident", questionLabel), node("h3", "question-title", item.expression_text));
   const badges = node("div", "question-badges"); badges.append(tag(item.matched ? "라벨 일치" : "라벨 불일치", item.matched ? "success" : "warning"));
   if (!item.structure_valid) badges.append(tag("구조 오류", "error"));
   const quality = item.quality || { status: "pending" };
