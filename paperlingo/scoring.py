@@ -14,7 +14,8 @@ from .dataset import Dataset, domain_code, occurrences, word_boundary
 from .submission import COMPACT_FIELDS, INFERENCE_POLICY, generated_question_id, normalize_question, question_format
 
 
-METRICS_VERSION = "exact-prq-v1"
+METRICS_VERSION = "exact-prq-v2"
+QUALITY_POLICY_VERSION = "auto-conservative-v1"
 QUESTION_FIELDS = {
     "question_id", "expression_text", "expression_type", "expression_span",
     "context_span", "blank_span", "options", "answer_id", "learning_point",
@@ -38,6 +39,7 @@ def empty_quality(*, structural: bool = False) -> dict:
         "option_assessments": [],
         "rationale": "문항 구조 검증에 실패하여 품질 점수가 0점입니다." if structural else "",
         "reviewer": None,
+        "review_recommended": False,
     }
 
 
@@ -211,6 +213,7 @@ def evaluate(dataset: Dataset, predictions: list[dict], paper_ids: list[str], sc
     predictions_by_id = {prediction["paper_id"]: prediction for prediction in predictions}
     report = {
         "metrics_version": METRICS_VERSION,
+        "quality_policy_version": QUALITY_POLICY_VERSION,
         "dataset_version": dataset.version,
         "scope": {"name": scope_name, "paper_ids": list(paper_ids), "paper_count": len(paper_ids)},
         "counts": {},
@@ -280,6 +283,8 @@ def recompute(report: dict) -> dict:
     complete = sum(_complete(item) for item in items)
     errors = sum(item["quality"].get("status") == "error" for item in items)
     needs_review = sum(item["quality"].get("status") == "needs_review" for item in items)
+    temporary = sum(item["quality"].get("source") == "temporary" for item in items)
+    review_recommended = sum(item["quality"].get("review_recommended") is True for item in items)
     pending = predicted - complete - errors - needs_review
     all_done = complete == predicted
     matched_done = all(_complete(item) for item in matched_items)
@@ -298,6 +303,9 @@ def recompute(report: dict) -> dict:
         gates = quality.get("gates") or {}
         return bool(
             item["structure_valid"] and _complete(item)
+            and quality.get("source") != "temporary"
+            and quality.get("review_recommended") is not True
+            and not any(assessment.get("verdict") == "uncertain" for assessment in quality.get("option_assessments", []))
             and quality.get("accepted_option_ids") == [item.get("answer_id")]
             and all(gates.get(name) is True for name in ("context_sufficient", "no_specialist_knowledge", "no_answer_leak"))
         )
@@ -314,7 +322,10 @@ def recompute(report: dict) -> dict:
         "quality_pending": pending,
         "quality_error": errors,
         "needs_review": needs_review,
+        "quality_temporary": temporary,
+        "review_recommended": review_recommended,
     }
+    report["score_mode"] = "temporary" if temporary else "reviewed"
     report["metrics"] = {
         "precision_pct": _percentage(precision),
         "recall_pct": _percentage(recall),

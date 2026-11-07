@@ -1,9 +1,15 @@
+import asyncio
 import json
+from types import SimpleNamespace
 
 import httpx
 import pytest
 
-from paperlingo.judge import JudgeConfig, _response_identity, judge_item, quality_from_review, strict_json_loads
+from paperlingo.judge import (
+    QUALITY_POLICY_VERSION, TEMPORARY_QUALITY_POLICY_VERSION,
+    JudgeConfig, _response_identity, judge_item, quality_from_review,
+    strict_json_loads, temporary_quality,
+)
 
 
 @pytest.fixture
@@ -70,6 +76,8 @@ def test_manual_quality_uses_same_code_gate(item, human_review, distinctness, ex
     assert result["source"] == "human"
     assert len(result["option_assessments"]) == 4
     assert result["accepted_option_ids"] == ["A"]
+    assert result["review_recommended"] is False
+    assert result["scoring_policy"] == QUALITY_POLICY_VERSION
 
 
 def test_ambiguity_is_completed_zero_not_high_rubric(item, llm_review):
@@ -112,11 +120,53 @@ def test_gate_failure_zero(item, human_review, gate):
     assert quality_from_review(item, human_review)["q"] == 0
 
 
-def test_uncertain_not_a_completed_zero(item, llm_review):
-    llm_review["option_assessments"][1]["verdict"] = "uncertain"
+@pytest.mark.parametrize("uncertain_option", [0, 1])
+def test_uncertainty_completes_conservatively_and_preserves_evidence(item, llm_review, uncertain_option):
+    llm_review["rubric"] = {criterion: 2 for criterion in llm_review["rubric"]}
+    llm_review["option_assessments"][uncertain_option]["verdict"] = "uncertain"
     result = quality_from_review(item, llm_review, "llm")
-    assert result["status"] == "needs_review"
-    assert result["q"] is None
+    assert result["status"] == "complete"
+    assert result["q"] == 0
+    assert result["review_recommended"] is True
+    assert result["scoring_policy"] == "auto-conservative-v1" == QUALITY_POLICY_VERSION
+    assert result["accepted_option_ids"] == ([] if uncertain_option == 0 else ["A"])
+    assert result["option_assessments"] == llm_review["option_assessments"]
+    assert result["rationale"] == llm_review["rationale"]
+
+
+def test_optional_human_review_can_replace_conservative_result(item, llm_review, human_review):
+    llm_review["option_assessments"][1]["verdict"] = "uncertain"
+    item["quality"] = quality_from_review(item, llm_review, "llm")
+    result = quality_from_review(item, human_review)
+    assert result["status"] == "complete"
+    assert result["q"] == 7 / 8
+    assert result["source"] == "human"
+    assert result["review_recommended"] is False
+
+
+def test_temporary_credit_is_explicit_and_contains_no_fabricated_review(item):
+    before = json.loads(json.dumps(item))
+    result = temporary_quality(item)
+    assert result["status"] == "complete"
+    assert result["source"] == "temporary"
+    assert result["q"] == 1
+    assert result["accepted_option_ids"] == []
+    assert result["option_assessments"] == []
+    assert result["rubric"] is None
+    assert result["gates"] is None
+    assert result["reviewer"] is None
+    assert result["review_recommended"] is True
+    assert result["scoring_policy"] == "temporary-full-credit-v1" == TEMPORARY_QUALITY_POLICY_VERSION
+    assert "자동 검수 생략" in result["rationale"]
+    assert "실제 검수 아님" in result["rationale"]
+    assert item == before
+
+
+@pytest.mark.parametrize("structure_valid", [False, None, 1, "true"])
+def test_temporary_credit_cannot_bypass_structure_failures(item, structure_valid):
+    item["structure_valid"] = structure_valid
+    with pytest.raises(ValueError, match="Structurally invalid"):
+        temporary_quality(item)
 
 
 @pytest.mark.parametrize("value", [True, False, 2.0, "2", 3, -1, None])
@@ -196,6 +246,21 @@ async def test_api_blindness_order_stability_and_metadata(monkeypatch, item, llm
 
 
 @pytest.mark.asyncio
+async def test_uncertain_model_response_finishes_with_zero_not_provider_error(monkeypatch, item, llm_review):
+    llm_review["option_assessments"][1]["verdict"] = "uncertain"
+    mock_transport(monkeypatch, lambda req: response_for(llm_review))
+    result = await judge_item(item, config())
+    assert result["status"] == "complete"
+    assert result["source"] == "llm"
+    assert result["q"] == 0
+    assert result["review_recommended"] is True
+    assert result["scoring_policy"] == QUALITY_POLICY_VERSION
+    assert result["option_assessments"][1]["verdict"] == "uncertain"
+    assert result["metadata"]["attempts"] == 1
+    assert "error_code" not in result
+
+
+@pytest.mark.asyncio
 async def test_provider_error_sanitized(monkeypatch, item):
     mock_transport(monkeypatch, lambda req: httpx.Response(401, json={"error": "secret-api-key/provider private body"}))
     result = await judge_item(item, config())
@@ -214,6 +279,7 @@ async def test_transport_error_sanitized(monkeypatch, item):
     mock_transport(monkeypatch, handler)
     result = await judge_item(item, config())
     assert result["status"] == "error"
+    assert result["q"] is None
     assert result["error_code"] == "transport_error"
     assert "secret-api-key" not in json.dumps(result)
 
@@ -234,6 +300,7 @@ async def test_malformed_provider_envelope(monkeypatch, item, body):
     mock_transport(monkeypatch, lambda req: httpx.Response(200, json=body))
     result = await judge_item(item, config())
     assert result["error_code"] == "invalid_response"
+    assert result["q"] is None
 
 
 @pytest.mark.asyncio
@@ -275,6 +342,7 @@ async def test_truncated_completion_is_not_graded(monkeypatch, item, llm_review)
     }))
     result = await judge_item(item, config())
     assert result["status"] == "error"
+    assert result["q"] is None
 
 
 @pytest.mark.asyncio
@@ -323,3 +391,110 @@ def test_response_identity_is_bounded_and_restricted():
 def test_no_credentials_in_endpoint(url):
     with pytest.raises(ValueError):
         JudgeConfig(url, "key", "model")
+
+
+def local_busy_response():
+    return httpx.Response(503, json={"error": {
+        "type": "local_validation",
+        "message": "The local model is busy; retry after the current request.",
+    }})
+
+
+@pytest.fixture
+def fake_retry_clock(monkeypatch):
+    clock = {"now": 100.0, "sleeps": []}
+
+    async def advance(seconds):
+        clock["sleeps"].append(seconds)
+        clock["now"] += seconds
+
+    # Replace this module's clock object rather than the event loop's clock.
+    monkeypatch.setattr("paperlingo.judge.time", SimpleNamespace(monotonic=lambda: clock["now"]))
+    monkeypatch.setattr("paperlingo.judge.asyncio.sleep", advance)
+    return clock
+
+
+@pytest.mark.asyncio
+async def test_local_busy_waits_for_gpu_without_consuming_regular_retries(monkeypatch, item, llm_review, fake_retry_clock):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return local_busy_response() if len(calls) <= 3 else response_for(llm_review)
+
+    mock_transport(monkeypatch, handler)
+    result = await judge_item(item, config(timeout=10))  # max_retries=0
+    assert result["status"] == "complete"
+    assert result["q"] == 7 / 8
+    assert len(calls) == result["metadata"]["attempts"] == 4
+    assert result["metadata"]["busy_retries"] == 3
+    assert result["metadata"]["busy_wait_ms"] == 6000
+    assert fake_retry_clock["sleeps"] == [2.0, 2.0, 2.0]
+
+
+@pytest.mark.asyncio
+async def test_local_busy_keeps_regular_retry_available_after_gpu_recovers(monkeypatch, item, llm_review, fake_retry_clock):
+    responses = [local_busy_response(), local_busy_response(), httpx.Response(503, json={"error": "ordinary outage"}), response_for(llm_review)]
+    mock_transport(monkeypatch, lambda request: responses.pop(0))
+    result = await judge_item(item, JudgeConfig("https://example.test/v1", "key", "test", timeout=10, max_retries=1))
+    assert result["status"] == "complete"
+    assert result["metadata"]["attempts"] == 4
+    assert result["metadata"]["busy_retries"] == 2
+    assert fake_retry_clock["sleeps"] == [2.0, 2.0, 1]
+
+
+@pytest.mark.asyncio
+async def test_local_busy_deadline_returns_unresolved_provider_error(monkeypatch, item, fake_retry_clock):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return local_busy_response()
+
+    mock_transport(monkeypatch, handler)
+    result = await judge_item(item, JudgeConfig("https://example.test/v1", "key", "test", timeout=5, max_retries=5))
+    assert result["status"] == "error"
+    assert result["q"] is None
+    assert result["error_code"] == "provider_error"
+    assert result["metadata"]["http_status"] == 503
+    assert result["metadata"]["busy_retries"] == 2
+    assert result["metadata"]["busy_wait_ms"] == 5000
+    assert result["metadata"]["latency_ms"] == 5000
+    assert len(calls) == 3
+    assert fake_retry_clock["sleeps"] == [2.0, 2.0, 1.0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status,error", [
+    (503, {"type": "server_error", "message": "The local model is busy; retry after the current request."}),
+    (503, {"type": "local_validation", "message": "Another validation error."}),
+    (500, {"type": "local_validation", "message": "The local model is busy; retry after the current request."}),
+    (503, "ordinary provider error"),
+])
+async def test_other_503_or_similar_errors_keep_regular_retry_limit(monkeypatch, item, fake_retry_clock, status, error):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(status, json={"error": error})
+
+    mock_transport(monkeypatch, handler)
+    result = await judge_item(item, JudgeConfig("https://example.test/v1", "key", "test", timeout=10, max_retries=2))
+    assert result["status"] == "error"
+    assert result["q"] is None
+    assert result["metadata"]["http_status"] == status
+    assert result["metadata"]["attempts"] == len(calls) == 3
+    assert "busy_retries" not in result["metadata"]
+    assert fake_retry_clock["sleeps"] == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_local_busy_wait_remains_cancellable(monkeypatch, item):
+    mock_transport(monkeypatch, lambda request: local_busy_response())
+
+    async def cancelled_sleep(seconds):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr("paperlingo.judge.asyncio.sleep", cancelled_sleep)
+    with pytest.raises(asyncio.CancelledError):
+        await judge_item(item, config())

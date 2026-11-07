@@ -251,11 +251,9 @@ def test_llm_background_uses_mock_and_never_returns_key(tmp_path, monkeypatch):
     with TestClient(create_app(cfg)) as client:
         assert "secret-never-return" not in client.get("/api/config").text
         run = create_demo(client)
-        response = client.post(f'/api/runs/{run["id"]}/judge', headers=HEADERS)
-        assert response.status_code == 200
         for _ in range(50):
             result = client.get(f'/api/runs/{run["id"]}').json()
-            if result["status"] != "judging":
+            if result["status"] not in {"queued", "judging"}:
                 break
             time.sleep(0.01)
         assert result["status"] == "complete"

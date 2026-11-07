@@ -24,6 +24,8 @@ PROMPT_PATH = Path(__file__).resolve().parent.parent / "prompts" / "judge_v1.txt
 RUBRIC_KEYS = {"plausibility", "learning_alignment", "distinctness", "no_cues"}
 GATE_KEYS = {"context_sufficient", "no_specialist_knowledge", "no_answer_leak"}
 VERDICTS = {"acceptable", "incorrect", "uncertain"}
+QUALITY_POLICY_VERSION = "auto-conservative-v1"
+TEMPORARY_QUALITY_POLICY_VERSION = "temporary-full-credit-v1"
 
 
 @dataclass(frozen=True)
@@ -80,6 +82,8 @@ def quality_from_review(item: dict, payload: dict, source: str = "human") -> dic
     API routing fields paper_id/question_id are allowed in human payloads only.
     Invalid schemas raise ValueError. Structurally invalid items cannot be repaired
     through reviews: they must be corrected in a fresh submission.
+    An uncertain verdict completes with conservative zero credit; its evidence
+    remains visible and a human review is recommended but not required.
     """
     if source not in {"human", "llm"}:
         raise ValueError("Review source must be human or llm.")
@@ -147,17 +151,42 @@ def quality_from_review(item: dict, payload: dict, source: str = "human") -> dic
 
     accepted = [a["id"] for a in assessments if a["verdict"] == "acceptable"]
     uncertain = any(a["verdict"] == "uncertain" for a in assessments)
-    valid = accepted == [item["answer_id"]] and all(gates.values())
+    valid = not uncertain and accepted == [item["answer_id"]] and all(gates.values())
     return {
-        "status": "needs_review" if uncertain else "complete",
+        "status": "complete",
         "source": source,
-        "q": None if uncertain else sum(rubric.values()) / 8 if valid else 0.0,
+        "q": sum(rubric.values()) / 8 if valid else 0.0,
         "accepted_option_ids": accepted,
         "rubric": dict(rubric),
         "gates": dict(gates),
         "option_assessments": assessments,
         "rationale": rationale,
         "reviewer": reviewer,
+        "review_recommended": uncertain,
+        "scoring_policy": QUALITY_POLICY_VERSION,
+    }
+
+
+def temporary_quality(item: dict) -> dict:
+    """Grant explicit temporary credit without inventing any review evidence.
+
+    This opt-in path does not repair structurally invalid questions and does not
+    represent an LLM or human judgment about the options.
+    """
+    if item.get("structure_valid") is not True:
+        raise ValueError("Structurally invalid items cannot receive temporary full credit.")
+    return {
+        "status": "complete",
+        "source": "temporary",
+        "q": 1.0,
+        "accepted_option_ids": [],
+        "rubric": None,
+        "gates": None,
+        "option_assessments": [],
+        "rationale": "자동 검수 생략, 임시 품질 만점(100%)을 적용했습니다. 실제 검수 아님: 보기의 정답성·유일성·품질을 확인한 결과가 아닙니다.",
+        "reviewer": None,
+        "review_recommended": True,
+        "scoring_policy": TEMPORARY_QUALITY_POLICY_VERSION,
     }
 
 
@@ -189,6 +218,21 @@ def _json_format_unsupported(response: httpx.Response) -> bool:
         parameter = error.get("param")
         return (parameter == "response_format" or "response_format" in message) and any(
             word in message for word in ("unsupported", "not supported", "unknown", "unrecognized", "not allowed")
+        )
+    except (ValueError, AttributeError):
+        return False
+
+
+def _local_model_busy(response: httpx.Response) -> bool:
+    """Recognize only our local server's exact active-inference response."""
+    if response.status_code != 503:
+        return False
+    try:
+        error = response.json().get("error", {})
+        return (
+            isinstance(error, dict)
+            and error.get("type") == "local_validation"
+            and error.get("message") == "The local model is busy; retry after the current request."
         )
     except (ValueError, AttributeError):
         return False
@@ -274,6 +318,7 @@ async def judge_item(item: dict, config: JudgeConfig) -> dict:
         headers["Authorization"] = f"Bearer {config.api_key}"
     retry_count = 0
     format_fallback = False
+    busy_deadline = start + config.timeout
     try:
         async with httpx.AsyncClient(timeout=config.timeout, follow_redirects=False) as client:
             while True:
@@ -290,6 +335,24 @@ async def judge_item(item: dict, config: JudgeConfig) -> dict:
                     format_fallback = True
                     metadata["json_mode_fallback"] = True
                     body.pop("response_format", None)
+                    continue
+                if _local_model_busy(response):
+                    # A cancelled web request can leave the separate GPU server
+                    # finishing inference. Give that call time to drain without
+                    # exhausting the ordinary transport/provider retry budget.
+                    metadata.setdefault("busy_retries", 0)
+                    metadata.setdefault("busy_wait_ms", 0)
+                    remaining = busy_deadline - time.monotonic()
+                    if remaining <= 0:
+                        metadata["http_status"] = 503
+                        return finish(_error_quality("provider_error", metadata))
+                    wait_start = time.monotonic()
+                    await asyncio.sleep(min(2.0, remaining))
+                    metadata["busy_wait_ms"] += round((time.monotonic() - wait_start) * 1000)
+                    if time.monotonic() >= busy_deadline:
+                        metadata["http_status"] = 503
+                        return finish(_error_quality("provider_error", metadata))
+                    metadata["busy_retries"] += 1
                     continue
                 if response.status_code == 429 or response.status_code >= 500:
                     if retry_count < config.max_retries:

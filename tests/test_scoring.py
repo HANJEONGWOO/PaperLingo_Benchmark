@@ -229,3 +229,119 @@ def test_prediction_data_is_not_mutated(dataset):
     report = evaluate(dataset, predictions, ["p1"], "custom")
     resolve(report["papers"][0]["items"][0])
     assert predictions == before
+
+
+def mark_temporary(item):
+    item["quality"] = {
+        "status": "complete", "source": "temporary", "q": 1.0,
+        "accepted_option_ids": [], "rubric": None, "gates": None,
+        "option_assessments": [], "rationale": "품질 검사를 건너뛴 임시 만점입니다.",
+        "reviewer": None, "review_recommended": False,
+    }
+
+
+def test_new_reports_identify_automatic_quality_policy(dataset):
+    report = evaluate(dataset, [], ["p1"], "custom")
+    assert report["metrics_version"] == "exact-prq-v2"
+    assert report["quality_policy_version"] == "auto-conservative-v1"
+    assert report["score_mode"] == "reviewed"
+    assert report["counts"]["quality_temporary"] == 0
+    assert report["counts"]["review_recommended"] == 0
+
+
+def test_temporary_quality_boosts_only_valid_items_and_keeps_expression_scores(dataset):
+    valid = question(dataset)
+    invalid = question(dataset, text="depend on", question_id="q2")
+    invalid["options"][1]["text"] = invalid["options"][0]["text"]
+    unmatched = question(dataset, text="Results", question_id="q3")
+    report = evaluate(dataset, [{"paper_id": "p1", "questions": [valid, invalid, unmatched]}], ["p1"], "custom")
+    original_expression_scores = {key: report["metrics"][key] for key in ("precision_pct", "recall_pct", "f1_pct")}
+    items = report["papers"][0]["items"]
+    for item in items:
+        mark_temporary(item)
+    recompute(report)
+
+    assert {key: report["metrics"][key] for key in original_expression_scores} == original_expression_scores
+    assert report["counts"]["predicted"] == 3
+    assert report["counts"]["matched"] == 2
+    assert report["counts"]["quality_complete"] == 3
+    assert report["counts"]["quality_temporary"] == 2
+    assert report["counts"]["review_recommended"] == 0
+    assert report["score_mode"] == "temporary"
+    assert items[1]["quality"]["source"] == "structural"
+    assert items[1]["quality"]["q"] == 0
+    assert report["metrics"]["quality_all_pct"] == pytest.approx(200 / 3)
+    assert report["metrics"]["quality_matched_pct"] == 50
+    assert report["metrics"]["final_score"] == pytest.approx(100 / 3)
+    assert report["metrics"]["unique_answer_rate_pct"] == 0
+
+    # Replacing the two provisional scores removes the temporary report flag.
+    resolve(items[0])
+    resolve(items[2])
+    recompute(report)
+    assert report["score_mode"] == "reviewed"
+    assert report["counts"]["quality_temporary"] == 0
+    assert report["metrics"]["unique_answer_rate_pct"] == pytest.approx(200 / 3)
+
+
+def test_temporary_source_cannot_invent_unique_answer_evidence(dataset):
+    report = evaluate(dataset, [{"paper_id": "p1", "questions": [question(dataset)]}], ["p1"], "custom")
+    item = report["papers"][0]["items"][0]
+    mark_temporary(item)
+    # Even stale accepted-option fields must not certify a provisional score.
+    item["quality"].update(accepted_option_ids=["A"], gates={"context_sufficient": True, "no_specialist_knowledge": True, "no_answer_leak": True})
+    recompute(report)
+    assert report["metrics"]["quality_matched_pct"] == 100
+    assert report["metrics"]["final_score"] == 50
+    assert report["metrics"]["unique_answer_rate_pct"] == 0
+
+
+def test_automatic_uncertainty_finishes_at_zero_with_optional_review(dataset):
+    report = evaluate(dataset, [{"paper_id": "p1", "questions": [question(dataset)]}], ["p1"], "custom")
+    item = report["papers"][0]["items"][0]
+    resolve(item, q=0)
+    item["quality"].update(
+        source="llm", review_recommended=True,
+        option_assessments=[
+            {"id": "A", "verdict": "acceptable", "reason": "정답은 자연스럽습니다."},
+            {"id": "B", "verdict": "uncertain", "reason": "추가로 허용 가능한지 불확실합니다."},
+            {"id": "C", "verdict": "incorrect", "reason": "부적절합니다."},
+            {"id": "D", "verdict": "incorrect", "reason": "부적절합니다."},
+        ],
+    )
+    recompute(report)
+    assert report["counts"]["quality_complete"] == 1
+    assert report["counts"]["quality_pending"] == 0
+    assert report["counts"]["needs_review"] == 0
+    assert report["counts"]["review_recommended"] == 1
+    assert report["metrics"]["final_score"] == 0
+    assert report["metrics"]["quality_all_pct"] == 0
+    assert report["metrics"]["unique_answer_rate_pct"] == 0
+    assert report["score_mode"] == "reviewed"
+
+
+def test_structural_failure_cannot_be_changed_to_temporary_or_recommended(dataset):
+    q = question(dataset)
+    q["answer_id"] = "Z"
+    report = evaluate(dataset, [{"paper_id": "p1", "questions": [q]}], ["p1"], "custom")
+    item = report["papers"][0]["items"][0]
+    mark_temporary(item)
+    item["quality"]["review_recommended"] = True
+    recompute(report)
+    assert item["quality"]["source"] == "structural"
+    assert item["quality"]["q"] == 0
+    assert report["counts"]["quality_temporary"] == 0
+    assert report["counts"]["review_recommended"] == 0
+    assert report["score_mode"] == "reviewed"
+    assert report["metrics"]["final_score"] == 0
+
+
+def test_recomputing_legacy_report_does_not_relabel_its_policy(dataset):
+    report = evaluate(dataset, [{"paper_id": "p1", "questions": [question(dataset)]}], ["p1"], "custom")
+    report["metrics_version"] = "exact-prq-v1"
+    report.pop("quality_policy_version")
+    resolve(report["papers"][0]["items"][0])
+    recompute(report)
+    assert report["metrics_version"] == "exact-prq-v1"
+    assert "quality_policy_version" not in report
+    assert report["metrics"]["final_score"] == 50

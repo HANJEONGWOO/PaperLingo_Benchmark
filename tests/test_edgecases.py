@@ -157,8 +157,7 @@ def test_failed_job_does_not_release_guard_with_live_sibling_calls(tmp_path, mon
     with TestClient(app) as http:
         sample = http.get("/api/sample").json()["predictions"]
         run = http.post("/api/runs", headers=HEADERS, json={"name": "job lifecycle", "scope": "demo", "predictions": sample}).json()
-        started = http.post(f"/api/runs/{run['id']}/judge", headers=HEADERS)
-        assert started.status_code == 200
+        assert run["status"] == "queued"
         for _ in range(100):
             if not app.state.jobs:
                 break

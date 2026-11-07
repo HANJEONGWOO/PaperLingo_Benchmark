@@ -82,16 +82,16 @@ class Store:
         for row in rows:
             r = self._decode(row)
             report = r.pop("report")
-            r.update(scope=report["scope"], metrics=report["metrics"], counts=report["counts"], dataset_version=report["dataset_version"], metrics_version=report["metrics_version"])
+            r.update(scope=report["scope"], metrics=report["metrics"], counts=report["counts"], dataset_version=report["dataset_version"], metrics_version=report["metrics_version"], score_mode=report.get("score_mode", "reviewed"), quality_policy_version=report.get("quality_policy_version"))
             result.append(r)
         return result
 
-    def save(self, run, review=None):
+    def save(self, run, review=None, reviews=None):
         run["updated_at"] = now()
         with self.connect() as db:
             db.execute("UPDATE runs SET updated_at=?, status=?, report=?, judge_meta=? WHERE id=?", (run["updated_at"], run["status"], json.dumps(run["report"], ensure_ascii=False, allow_nan=False), json.dumps(run.get("judge_meta", {}), ensure_ascii=False, allow_nan=False), run["id"]))
-            if review:
-                db.execute("INSERT INTO reviews (run_id,paper_id,question_id,created_at,previous_quality,quality) VALUES (?,?,?,?,?,?)", (run["id"], review["paper_id"], review["question_id"], now(), json.dumps(review["previous_quality"], ensure_ascii=False), json.dumps(review["quality"], ensure_ascii=False)))
+            for entry in ([review] if review else []) + (reviews or []):
+                db.execute("INSERT INTO reviews (run_id,paper_id,question_id,created_at,previous_quality,quality) VALUES (?,?,?,?,?,?)", (run["id"], entry["paper_id"], entry["question_id"], now(), json.dumps(entry["previous_quality"], ensure_ascii=False), json.dumps(entry["quality"], ensure_ascii=False)))
         return run
 
     def review_history(self, run_id):
@@ -101,10 +101,12 @@ class Store:
 
     def recover_interrupted(self):
         with self.connect() as db:
-            rows = db.execute("SELECT * FROM runs WHERE status='judging'").fetchall()
+            rows = db.execute("SELECT * FROM runs WHERE status IN ('judging', 'queued')").fetchall()
         for row in rows:
             run = self._decode(row)
-            run["status"] = report_status(run["report"])
+            unfinished = any(i["structure_valid"] and (i["quality"]["status"] in {"pending", "needs_review", "error"}
+                             or i["quality"].get("source") == "temporary") for p in run["report"]["papers"] for i in p["items"])
+            run["status"] = "queued" if unfinished and run["judge_meta"].get("job_id") else report_status(run["report"])
             run["judge_meta"]["interrupted"] = True
             self.save(run)
 

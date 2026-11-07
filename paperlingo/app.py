@@ -24,11 +24,11 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .config import Settings, ROOT
 from .dataset import Dataset
-from .judge import JudgeConfig, judge_item, quality_from_review
-from .scoring import SubmissionError, evaluate, recompute
+from .judge import JudgeConfig, judge_item, quality_from_review, temporary_quality, QUALITY_POLICY_VERSION
+from .scoring import METRICS_VERSION, SubmissionError, evaluate, recompute
 from .storage import Store, now, report_status
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 COOKIE = "paperlingo_session"
 
 
@@ -124,6 +124,8 @@ def create_app(settings: Settings | None = None):
     dataset = Dataset(cfg.data_dir)
     store = Store(cfg.runtime_dir)
     jobs: dict[str, asyncio.Task] = {}
+    all_tasks: set[asyncio.Task] = set()
+    judge_lock = asyncio.Lock()
     write_lock = asyncio.Lock()
     login_attempts = defaultdict(deque)
     upload_attempts = defaultdict(deque)
@@ -132,8 +134,27 @@ def create_app(settings: Settings | None = None):
     @asynccontextmanager
     async def lifespan(app):
         store.recover_interrupted()
+        if cfg.judge_configured:
+            # Resume interrupted work and finish legacy records that were left
+            # waiting for manual review. Completed reviews are never selected.
+            async with write_lock:
+                for summary in reversed(store.summaries(cfg.max_runs)):
+                    if summary["status"] in {"queued", "awaiting_review", "needs_review"}:
+                        run = store.get(summary["id"])
+                        if run["report"]["dataset_version"] == dataset.version:
+                            enqueue_judge(run, automatic=True)
+                        elif run["status"] == "queued":
+                            run["status"] = "error"
+                            run["judge_meta"]["error"] = "데이터셋 버전이 변경되어 자동 검수를 재개하지 못했습니다. 새 평가를 생성하세요."
+                            store.save(run)
+        else:
+            for summary in store.summaries(cfg.max_runs):
+                if summary["status"] == "queued":
+                    run = store.get(summary["id"])
+                    run["status"] = report_status(run["report"])
+                    store.save(run)
         yield
-        tasks = list(jobs.values())
+        tasks = list(all_tasks)
         for task in tasks:
             task.cancel()
         if tasks:
@@ -239,7 +260,7 @@ def create_app(settings: Settings | None = None):
     @app.get("/api/config")
     def config(request: Request):
         need_read(request)
-        return {"dataset": dataset.summary(), "judge": {"configured": cfg.judge_configured, "model": cfg.judge_model, "base_url": cfg.judge_base_url, "concurrency": cfg.judge_concurrency}, "auth_required": bool(cfg.password) and not cfg.public_access, "public_read": cfg.public_read or cfg.public_access, "public_access": cfg.public_access, "can_manage": is_admin(request), "limits": {"max_upload_bytes": cfg.max_request_bytes, "max_questions_per_judge_run": cfg.judge_batch_size, "max_runs": cfg.max_runs}, "version": VERSION}
+        return {"dataset": dataset.summary(), "judge": {"configured": cfg.judge_configured, "automatic": cfg.judge_configured, "model": cfg.judge_model, "base_url": cfg.judge_base_url, "concurrency": cfg.judge_concurrency}, "auth_required": bool(cfg.password) and not cfg.public_access, "public_read": cfg.public_read or cfg.public_access, "public_access": cfg.public_access, "can_manage": is_admin(request), "limits": {"max_upload_bytes": cfg.max_request_bytes, "judge_batch_size": cfg.judge_batch_size, "max_runs": cfg.max_runs}, "version": VERSION}
 
     @app.get("/api/judge/status")
     async def judge_status(request: Request):
@@ -359,22 +380,63 @@ def create_app(settings: Settings | None = None):
         async with write_lock:
             if store.count() >= cfg.max_runs:
                 raise HTTPException(409, "평가 기록 저장 한도에 도달했습니다. 관리자가 백업 후 저장소를 정리해야 합니다.")
-            return store.create(body.name.strip(), report, predictions == dataset.demo_predictions(compact=True) or predictions == dataset.demo_predictions())
+            run = store.create(body.name.strip(), report, predictions == dataset.demo_predictions(compact=True) or predictions == dataset.demo_predictions())
+            if cfg.judge_configured:
+                enqueue_judge(run, automatic=True)
+            return run
 
     @app.get("/api/runs/{run_id}")
     def run_detail(run_id: str, request: Request):
         need_read(request)
         return get_run(run_id)
 
-    async def do_judge(run_id, selected):
+    def pending_items(run):
+        return [(p["paper_id"], copy.deepcopy(i)) for p in run["report"]["papers"] for i in p["items"]
+                if i["structure_valid"] and (i["quality"]["status"] in {"pending", "needs_review", "error"}
+                                             or i["quality"].get("source") == "temporary")]
+
+    def enqueue_judge(run, automatic=False):
+        """Called under write_lock; persist the queue before starting its task."""
+        selected = pending_items(run)
+        if not selected:
+            run["status"] = report_status(run["report"])
+            store.save(run)
+            return False
+        job_id = secrets.token_hex(12)
+        run["status"] = "queued"
+        run["report"]["metrics_version"] = METRICS_VERSION
+        run["report"]["quality_policy_version"] = QUALITY_POLICY_VERSION
+        run["judge_meta"] = {"model": cfg.judge_model, "job_id": job_id, "automatic": automatic,
+                             "queued_at": now(), "total": len(selected), "processed": 0,
+                             "remaining_after_batch": 0}
+        recompute(run["report"])
+        store.save(run)
+        task = asyncio.create_task(do_judge(run["id"], job_id, selected))
+        jobs[run["id"]] = task
+        all_tasks.add(task)
+        task.add_done_callback(all_tasks.discard)
+        return True
+
+    def current_job(run, job_id):
+        return run["judge_meta"].get("job_id") == job_id and run["status"] in {"queued", "judging"}
+
+    async def do_judge(run_id, job_id, selected):
         semaphore = asyncio.Semaphore(cfg.judge_concurrency)
         judge_cfg = JudgeConfig(base_url=cfg.judge_base_url, api_key=cfg.judge_api_key, model=cfg.judge_model, timeout=cfg.judge_timeout)
 
         async def one(pid, item):
             async with semaphore:
+                async with write_lock:
+                    if not current_job(get_run(run_id), job_id):
+                        return
                 quality = await judge_item(item, judge_cfg)
             async with write_lock:
                 run = get_run(run_id)
+                # Skip returns immediately, but an in-flight GPU call drains
+                # before the next run starts. Its late result cannot overwrite
+                # temporary scores or an optional human correction.
+                if not current_job(run, job_id):
+                    return
                 for paper in run["report"]["papers"]:
                     if paper["paper_id"] == pid:
                         for current in paper["items"]:
@@ -387,31 +449,48 @@ def create_app(settings: Settings | None = None):
                 store.save(run, {"paper_id": pid, "question_id": item["question_id"], "previous_quality": previous, "quality": quality})
 
         try:
-            outcomes = await asyncio.gather(*(one(pid, item) for pid, item in selected), return_exceptions=True)
-            if any(isinstance(outcome, BaseException) for outcome in outcomes):
-                raise RuntimeError("One or more judge tasks could not be completed")
+            async with judge_lock:
+                async with write_lock:
+                    run = get_run(run_id)
+                    if not current_job(run, job_id):
+                        return
+                    run["status"] = "judging"
+                    run["judge_meta"]["started_at"] = now()
+                    store.save(run)
+                for offset in range(0, len(selected), cfg.judge_batch_size):
+                    async with write_lock:
+                        if not current_job(get_run(run_id), job_id):
+                            return
+                    batch = selected[offset:offset + cfg.judge_batch_size]
+                    outcomes = await asyncio.gather(*(one(pid, item) for pid, item in batch), return_exceptions=True)
+                    if any(isinstance(outcome, BaseException) for outcome in outcomes):
+                        raise RuntimeError("One or more judge tasks could not be completed")
         except asyncio.CancelledError:
             async with write_lock:
                 run = get_run(run_id)
-                run["judge_meta"]["interrupted"] = True
-                run["status"] = report_status(run["report"])
-                store.save(run)
+                if current_job(run, job_id):
+                    run["judge_meta"]["interrupted"] = True
+                    run["status"] = "queued"
+                    store.save(run)
             raise
         except Exception:
             # Never place provider responses or credentials in public errors.
             async with write_lock:
                 run = get_run(run_id)
-                run["judge_meta"]["error"] = "평가 작업이 중단되었습니다. 미완료 문항을 다시 실행하세요."
-                run["status"] = "error"
-                store.save(run)
+                if current_job(run, job_id):
+                    run["judge_meta"]["error"] = "평가 작업이 중단되었습니다. 미완료 문항을 다시 실행하세요."
+                    run["status"] = "error"
+                    store.save(run)
         else:
             async with write_lock:
                 run = get_run(run_id)
-                run["status"] = report_status(run["report"])
-                run["judge_meta"]["finished_at"] = now()
-                store.save(run)
+                if current_job(run, job_id):
+                    run["status"] = report_status(run["report"])
+                    run["judge_meta"]["finished_at"] = now()
+                    store.save(run)
         finally:
-            jobs.pop(run_id, None)
+            if jobs.get(run_id) is asyncio.current_task():
+                jobs.pop(run_id, None)
 
     @app.post("/api/runs/{run_id}/judge")
     async def start_judge(run_id: str, request: Request):
@@ -419,28 +498,52 @@ def create_app(settings: Settings | None = None):
         if not cfg.judge_configured:
             raise HTTPException(409, "서버의 JUDGE_BASE_URL과 JUDGE_MODEL을 설정하세요. 필요하면 JUDGE_API_KEY도 설정하세요.")
         async with write_lock:
-            if jobs:
-                raise HTTPException(409, "다른 LLM 평가가 진행 중입니다. 완료 후 다시 실행하세요.")
             run = get_run(run_id)
             if run["report"]["dataset_version"] != dataset.version:
                 raise HTTPException(409, "데이터셋 버전이 변경되었습니다. 새 평가 기록을 생성하세요.")
-            pending = [(p["paper_id"], copy.deepcopy(i)) for p in run["report"]["papers"] for i in p["items"] if i["structure_valid"] and i["quality"]["status"] in {"pending", "needs_review", "error"}]
-            if not pending:
+            if run["status"] in {"queued", "judging"}:
+                return {"status": run["status"], "count": run["judge_meta"].get("total", 0), "remaining_after_batch": 0}
+            if not enqueue_judge(run):
                 raise HTTPException(409, "LLM 평가가 필요한 문항이 없습니다.")
-            selected = pending[:cfg.judge_batch_size]
-            run["status"] = "judging"
-            run["judge_meta"] = {"model": cfg.judge_model, "started_at": now(), "total": len(selected), "processed": 0, "remaining_after_batch": len(pending) - len(selected)}
-            store.save(run)
-            jobs[run_id] = asyncio.create_task(do_judge(run_id, selected))
-        return {"status": "judging", "count": len(selected), "remaining_after_batch": len(pending) - len(selected)}
+        return {"status": "queued", "count": run["judge_meta"]["total"], "remaining_after_batch": 0}
+
+    @app.post("/api/runs/{run_id}/skip-judge")
+    async def skip_judge(run_id: str, request: Request):
+        need_admin(request)
+        async with write_lock:
+            run = get_run(run_id)
+            queued_task = jobs.get(run_id) if run["status"] == "queued" else None
+            valid = [(p, i) for p in run["report"]["papers"] for i in p["items"] if i["structure_valid"]]
+            if not valid:
+                raise HTTPException(409, "임시 품질 만점을 적용할 구조 유효 문항이 없습니다.")
+            reviews = []
+            for paper, item in valid:
+                if item["quality"].get("source") == "temporary":
+                    continue
+                previous = copy.deepcopy(item["quality"])
+                item["quality"] = temporary_quality(item)
+                reviews.append({"paper_id": paper["paper_id"], "question_id": item["question_id"],
+                                "previous_quality": previous, "quality": item["quality"]})
+            run["judge_meta"].update(job_id=None, skipped_at=now(), temporary_full_credit=True)
+            run["report"]["metrics_version"] = METRICS_VERSION
+            run["report"]["quality_policy_version"] = QUALITY_POLICY_VERSION
+            recompute(run["report"])
+            run["status"] = report_status(run["report"])
+            store.save(run, reviews=reviews)
+            if queued_task:
+                # No inference has started; remove the queue entry immediately.
+                queued_task.cancel()
+                if jobs.get(run_id) is queued_task:
+                    jobs.pop(run_id, None)
+            return run
 
     @app.post("/api/runs/{run_id}/reviews")
     async def review(run_id: str, body: dict, request: Request):
         need_admin(request)
         async with write_lock:
-            if run_id in jobs:
-                raise HTTPException(409, "LLM 평가가 끝난 뒤 수동 검수를 저장하세요.")
             run = get_run(run_id)
+            if run["status"] in {"queued", "judging"}:
+                raise HTTPException(409, "LLM 평가가 끝난 뒤 수동 검수를 저장하세요.")
             item = next((i for p in run["report"]["papers"] if p["paper_id"] == body.get("paper_id") for i in p["items"] if i["question_id"] == body.get("question_id")), None)
             if item is None:
                 raise HTTPException(404, "해당 문항을 찾을 수 없습니다.")
@@ -466,13 +569,13 @@ def create_app(settings: Settings | None = None):
             return Response(json.dumps(run, ensure_ascii=False, indent=2), media_type="application/json", headers={"Content-Disposition": f'attachment; filename="paperlingo-{run_id}.json"'})
         buffer = io.StringIO()
         writer = csv.writer(buffer)
-        writer.writerow(["paper_id", "question_id", "expression", "matched", "structure_valid", "quality_status", "quality_source", "quality_score_pct", "accepted_options", "answer_id", "issues", "rationale"])
+        writer.writerow(["paper_id", "question_id", "expression", "matched", "structure_valid", "quality_status", "quality_source", "quality_score_pct", "accepted_options", "answer_id", "issues", "rationale", "score_mode", "quality_policy", "metrics_version"])
         for paper in run["report"]["papers"]:
             if not paper["items"]:
-                writer.writerow([csv_value(paper["paper_id"]), "", "", "", "", "empty_submission" if paper["submitted"] else "missing_submission"] + [""] * 6)
+                writer.writerow([csv_value(paper["paper_id"]), "", "", "", "", "empty_submission" if paper["submitted"] else "missing_submission"] + [""] * 6 + [run["report"].get("score_mode", "reviewed"), "", run["report"]["metrics_version"]])
             for item in paper["items"]:
                 q = item["quality"]
-                writer.writerow([csv_value(x) for x in [paper["paper_id"], item["question_id"], item["expression_text"], item["matched"], item["structure_valid"], q["status"], q["source"], None if q["q"] is None else round(q["q"] * 100, 2), ",".join(q.get("accepted_option_ids", [])), item.get("answer_id", ""), "; ".join(i["message"] for i in item["issues"]), q.get("rationale", "")]])
+                writer.writerow([csv_value(x) for x in [paper["paper_id"], item["question_id"], item["expression_text"], item["matched"], item["structure_valid"], q["status"], q["source"], None if q["q"] is None else round(q["q"] * 100, 2), ",".join(q.get("accepted_option_ids", [])), item.get("answer_id", ""), "; ".join(i["message"] for i in item["issues"]), q.get("rationale", ""), run["report"].get("score_mode", "reviewed"), q.get("scoring_policy", ""), run["report"]["metrics_version"]]])
         return Response("\ufeff" + buffer.getvalue(), media_type="text/csv; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="paperlingo-{run_id}.csv"'})
 
     static = Path(__file__).parent / "static"
