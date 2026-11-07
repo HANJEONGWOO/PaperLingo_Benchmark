@@ -1,0 +1,6 @@
+Noto Sans KR variable font (weights 100-900)
+Source: https://github.com/google/fonts/tree/main/ofl/notosanskr
+Original: https://raw.githubusercontent.com/google/fonts/main/ofl/notosanskr/NotoSansKR%5Bwght%5D.ttf
+License: SIL Open Font License 1.1; see OFL-NotoSansKR.txt.
+Distribution: lossless WOFF2 format conversion using fontTools. Glyphs and naming are unchanged.
+This font is self-hosted. The application makes no runtime request to Google Fonts.

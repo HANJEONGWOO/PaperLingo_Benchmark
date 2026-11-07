@@ -1,0 +1,15 @@
+[Unit]
+Description=PaperLingo benchmark web server
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/hjw/git/PaperLingo_Benchmark
+ExecStart=/home/hjw/git/PaperLingo_Benchmark/.venv/bin/python -m paperlingo
+Restart=on-failure
+RestartSec=5
+UMask=0077
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

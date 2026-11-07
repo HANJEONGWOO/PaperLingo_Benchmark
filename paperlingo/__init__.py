@@ -1,0 +1,1 @@
+"""PaperLingo benchmark application."""

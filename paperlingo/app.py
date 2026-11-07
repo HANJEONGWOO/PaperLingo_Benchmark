@@ -1,0 +1,464 @@
+"""Self-hosted API and static application for PaperLingo."""
+import asyncio
+from collections import defaultdict, deque
+from contextlib import asynccontextmanager
+import copy
+import csv
+import hashlib
+import io
+import json
+import math
+from pathlib import Path
+import secrets
+import time
+from typing import Any, Literal
+from urllib.parse import urlsplit
+
+import httpx
+
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, ConfigDict, Field
+from starlette.middleware.trustedhost import TrustedHostMiddleware
+
+from .config import Settings, ROOT
+from .dataset import Dataset
+from .judge import JudgeConfig, judge_item, quality_from_review
+from .scoring import SubmissionError, evaluate, recompute
+from .storage import Store, now, report_status
+
+VERSION = "0.1.0"
+COOKIE = "paperlingo_session"
+
+
+def strict_json(value):
+    def reject_constant(value):
+        raise ValueError("JSON에는 NaN 또는 Infinity를 사용할 수 없습니다.")
+
+    def unique_pairs(pairs):
+        obj = {}
+        for key, value in pairs:
+            if key in obj:
+                raise ValueError("JSON 객체에 중복된 필드가 있습니다.")
+            obj[key] = value
+        return obj
+
+    return json.loads(value, parse_constant=reject_constant, object_pairs_hook=unique_pairs)
+
+
+def validate_json_tree(value):
+    pending = [(value, 0)]
+    while pending:
+        obj, depth = pending.pop()
+        if depth > 30:
+            raise ValueError("JSON 중첩이 너무 깊습니다.")
+        if isinstance(obj, float) and not math.isfinite(obj):
+            raise ValueError("유한하지 않은 숫자는 사용할 수 없습니다.")
+        if isinstance(obj, dict):
+            pending.extend((v, depth + 1) for v in obj.values())
+        elif isinstance(obj, list):
+            pending.extend((v, depth + 1) for v in obj)
+
+
+class LoginInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    password: str = Field(min_length=1, max_length=1024)
+
+
+class RunInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=120)
+    scope: Literal["demo", "development", "validation", "test", "all", "custom"]
+    paper_ids: list[str] | None = None
+    predictions: str | list[dict[str, Any]]
+
+
+def parse_predictions(value):
+    if isinstance(value, list):
+        try:
+            validate_json_tree(value)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+        return value
+    if not value.strip():
+        raise HTTPException(422, "생성 결과가 비어 있습니다. 빈 제출은 []로 명시하세요.")
+    try:
+        parsed = strict_json(value)
+    except json.JSONDecodeError:
+        parsed = []
+        for line_number, line in enumerate(value.splitlines(), 1):
+            if not line.strip():
+                continue
+            try:
+                parsed.append(strict_json(line))
+            except (ValueError, RecursionError):
+                raise HTTPException(422, f"JSONL {line_number}행의 JSON 문법을 확인하세요.") from None
+    except (ValueError, RecursionError) as exc:
+        raise HTTPException(422, "올바른 JSON 형식인지 확인하세요. 중복 필드와 NaN/Infinity는 허용하지 않습니다.") from None
+    if isinstance(parsed, dict) and "paper_id" in parsed:
+        parsed = [parsed]
+    if not isinstance(parsed, list) or any(not isinstance(p, dict) for p in parsed):
+        raise HTTPException(422, "논문별 JSON 객체의 배열 또는 JSONL을 제출하세요.")
+    try:
+        validate_json_tree(parsed)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
+    return parsed
+
+
+def csv_value(value):
+    text = "" if value is None else str(value)
+    return "'" + text if text.lstrip().startswith(("=", "+", "-", "@")) or text.startswith(("\t", "\r", "\n")) else text
+
+
+def create_app(settings: Settings | None = None):
+    cfg = settings or Settings.from_env()
+    cfg.validate()
+    dataset = Dataset(cfg.data_dir)
+    store = Store(cfg.runtime_dir)
+    jobs: dict[str, asyncio.Task] = {}
+    write_lock = asyncio.Lock()
+    login_attempts = defaultdict(deque)
+    upload_attempts = defaultdict(deque)
+    judge_health_cache = {"checked": 0.0, "value": None}
+
+    @asynccontextmanager
+    async def lifespan(app):
+        store.recover_interrupted()
+        yield
+        tasks = list(jobs.values())
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    app = FastAPI(title="PaperLingo Benchmark", version=VERSION, lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+    app.state.dataset, app.state.store, app.state.settings, app.state.jobs = dataset, store, cfg, jobs
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(cfg.allowed_hosts))
+
+    def is_admin(request):
+        if cfg.public_access:
+            return True
+        if not cfg.password:
+            return bool(request.client and request.client.host in {"127.0.0.1", "::1", "testclient"})
+        return store.valid_session(request.cookies.get(COOKIE))
+
+    def need_read(request):
+        if not (cfg.public_read or cfg.public_access or is_admin(request)):
+            raise HTTPException(401, "팀 비밀번호로 로그인하세요.")
+
+    def need_admin(request):
+        if not is_admin(request):
+            raise HTTPException(401, "이 작업에는 관리자 로그인이 필요합니다.")
+
+    def get_run(run_id):
+        run = store.get(run_id)
+        if run is None:
+            raise HTTPException(404, "평가 기록을 찾을 수 없습니다.")
+        return run
+
+    @app.middleware("http")
+    async def browser_guard(request: Request, call_next):
+        if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+            if request.headers.get("X-Requested-With") != "PaperLingo":
+                return JSONResponse({"detail": "X-Requested-With: PaperLingo 헤더가 필요합니다."}, 403)
+            origin = request.headers.get("origin")
+            if origin:
+                parsed = urlsplit(origin)
+                if parsed.scheme != request.url.scheme or parsed.netloc.lower() != request.url.netloc.lower():
+                    return JSONResponse({"detail": "다른 사이트에서 보낸 변경 요청은 허용하지 않습니다."}, 403)
+            try:
+                declared = int(request.headers.get("content-length", "0"))
+            except ValueError:
+                return JSONResponse({"detail": "잘못된 Content-Length입니다."}, 400)
+            if declared > cfg.max_request_bytes:
+                return JSONResponse({"detail": "업로드는 16MB 이하여야 합니다."}, 413)
+            chunks, total = [], 0
+            async for chunk in request.stream():
+                total += len(chunk)
+                if total > cfg.max_request_bytes:
+                    return JSONResponse({"detail": "업로드는 16MB 이하여야 합니다."}, 413)
+                chunks.append(chunk)
+            request._body = b"".join(chunks)
+            if request._body:
+                if "application/json" not in request.headers.get("content-type", ""):
+                    return JSONResponse({"detail": "Content-Type: application/json으로 요청하세요."}, 415)
+                try:
+                    validate_json_tree(strict_json(request._body))
+                except (ValueError, RecursionError):
+                    return JSONResponse({"detail": "올바른 JSON을 제출하세요. 중복 필드·NaN·Infinity·과도한 중첩은 허용하지 않습니다."}, 422)
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "same-origin"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+        if request.url.path.startswith("/api/"):
+            response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.get("/api/health")
+    def health():
+        return {"status": "ok", "version": VERSION}
+
+    @app.get("/api/session")
+    def session(request: Request):
+        admin = is_admin(request)
+        return {"authenticated": admin, "auth_required": bool(cfg.password) and not cfg.public_access, "can_manage": admin, "public_read": cfg.public_read or cfg.public_access, "public_access": cfg.public_access}
+
+    @app.post("/api/login")
+    async def login(body: LoginInput, request: Request):
+        client = request.client.host if request.client else "unknown"
+        attempts = login_attempts[client]
+        clock = time.monotonic()
+        while attempts and attempts[0] < clock - 60:
+            attempts.popleft()
+        if len(attempts) >= 5:
+            raise HTTPException(429, "로그인 시도가 많습니다. 1분 후 다시 시도하세요.")
+        attempts.append(clock)
+        if not cfg.password or not secrets.compare_digest(hashlib.sha256(body.password.encode()).digest(), hashlib.sha256(cfg.password.encode()).digest()):
+            raise HTTPException(401, "비밀번호가 올바르지 않습니다.")
+        attempts.clear()
+        response = JSONResponse({"authenticated": True, "can_manage": True})
+        response.set_cookie(COOKIE, store.create_session(cfg.session_hours), httponly=True, secure=cfg.secure_cookie, samesite="strict", max_age=cfg.session_hours * 3600, path="/")
+        return response
+
+    @app.post("/api/logout")
+    def logout(request: Request):
+        store.remove_session(request.cookies.get(COOKIE))
+        response = JSONResponse({"ok": True})
+        response.delete_cookie(COOKIE, path="/")
+        return response
+
+    @app.get("/api/config")
+    def config(request: Request):
+        need_read(request)
+        return {"dataset": dataset.summary(), "judge": {"configured": cfg.judge_configured, "model": cfg.judge_model, "base_url": cfg.judge_base_url, "concurrency": cfg.judge_concurrency}, "auth_required": bool(cfg.password) and not cfg.public_access, "public_read": cfg.public_read or cfg.public_access, "public_access": cfg.public_access, "can_manage": is_admin(request), "limits": {"max_upload_bytes": cfg.max_request_bytes, "max_questions_per_judge_run": cfg.judge_batch_size, "max_runs": cfg.max_runs}, "version": VERSION}
+
+    @app.get("/api/judge/status")
+    async def judge_status(request: Request):
+        need_read(request)
+        if not cfg.judge_configured:
+            return {"configured": False, "ready": False, "model": "", "message": "LLM 평가 모델이 설정되지 않았습니다."}
+        if judge_health_cache["value"] is not None and time.monotonic() - judge_health_cache["checked"] < 5:
+            return judge_health_cache["value"]
+        endpoint = cfg.judge_base_url.removesuffix("/chat/completions").rstrip("/") + "/models"
+        headers = {"Authorization": f"Bearer {cfg.judge_api_key}"} if cfg.judge_api_key else {}
+        value = {"configured": True, "ready": False, "model": cfg.judge_model, "message": "평가 모델을 불러오는 중이거나 로컬 서버가 중지되어 있습니다."}
+        try:
+            async with httpx.AsyncClient(timeout=2, follow_redirects=False) as http:
+                response = await http.get(endpoint, headers=headers)
+                if response.status_code == 200:
+                    records = response.json().get("data", [])
+                    value["ready"] = any(isinstance(row, dict) and row.get("id") == cfg.judge_model for row in records)
+                    value["message"] = "평가 모델이 준비되었습니다." if value["ready"] else "설정된 모델을 추론 서버에서 찾을 수 없습니다."
+        except (httpx.HTTPError, ValueError, TypeError, AttributeError):
+            pass
+        judge_health_cache.update(checked=time.monotonic(), value=value)
+        return value
+
+    @app.get("/api/splits")
+    def splits(request: Request, download: bool = False):
+        need_read(request)
+        manifest = {"dataset_version": dataset.version, "seed": dataset.SPLIT_SEED, "splits": dataset.splits}
+        if download:
+            return Response(json.dumps(manifest, ensure_ascii=False, indent=2), media_type="application/json", headers={"Content-Disposition": 'attachment; filename="paperlingo-splits.json"'})
+        return manifest
+
+    @app.get("/api/papers")
+    def papers(request: Request, q: str = "", offset: int = 0, limit: int = 20, domain: str = ""):
+        need_read(request)
+        q = q[:200].casefold()
+        rows = []
+        for pid, paper in dataset.papers.items():
+            dom = paper.get("domain", {})
+            code = dom.get("code", "") if isinstance(dom, dict) else str(dom)
+            if domain and domain != code:
+                continue
+            if q and q not in f"{pid} {paper['paper_name']} {code}".casefold():
+                continue
+            rows.append({"paper_id": pid, "paper_name": paper["paper_name"], "domain": code, "gold_count": len(dataset.labels[pid])})
+        offset, limit = max(offset, 0), max(1, min(limit, 100))
+        return {"items": rows[offset:offset + limit], "total": len(rows)}
+
+    @app.get("/api/papers/{paper_id:path}")
+    def paper_detail(paper_id: str, request: Request):
+        need_read(request)
+        if paper_id not in dataset.papers:
+            raise HTTPException(404, "논문을 찾을 수 없습니다.")
+        return {**dataset.papers[paper_id], "expressions": dataset.labels[paper_id]}
+
+    @app.get("/api/sample")
+    def sample(request: Request, download: bool = False):
+        need_read(request)
+        predictions = dataset.demo_predictions()
+        if download:
+            content = "\n".join(json.dumps(p, ensure_ascii=False) for p in predictions) + "\n"
+            return Response(content, media_type="application/x-ndjson", headers={"Content-Disposition": 'attachment; filename="paperlingo-format-example.jsonl"'})
+        return {"scope": "demo", "paper_ids": dataset.splits["demo"], "predictions": predictions, "note": "직접 작성한 형식 예제입니다. 모델의 실측 성능이 아닙니다."}
+
+    @app.get("/api/schema")
+    def schema(request: Request):
+        need_read(request)
+        return {"version": VERSION, "input": "논문별 객체의 JSON 배열 또는 JSONL", "max_questions_per_paper": 5, "span_convention": "abstract 기준 Python 유니코드 문자, 0부터 시작, end 제외", "required_paper_fields": ["paper_id", "questions"], "required_question_fields": ["question_id", "expression_text", "expression_span", "context_span", "blank_span", "options", "answer_id"], "option_ids": ["A", "B", "C", "D"], "sample": dataset.demo_predictions()[0]}
+
+    @app.get("/api/runs")
+    def runs(request: Request):
+        need_read(request)
+        return {"items": store.summaries(cfg.max_runs)}
+
+    @app.post("/api/runs", status_code=201)
+    async def new_run(body: RunInput, request: Request):
+        need_admin(request)
+        if cfg.public_access:
+            clock = time.monotonic()
+            key = request.client.host if request.client else "unknown"
+            attempts = upload_attempts[key]
+            while attempts and attempts[0] < clock - 60:
+                attempts.popleft()
+            if len(attempts) >= 10:
+                raise HTTPException(429, "한 번에 너무 많은 평가가 제출되었습니다. 1분 후 다시 시도하세요.")
+            attempts.append(clock)
+        predictions = parse_predictions(body.predictions)
+        if not body.name.strip():
+            raise HTTPException(422, "평가 이름을 입력하세요.")
+        if body.scope == "custom":
+            paper_ids = body.paper_ids
+            if not paper_ids or len(paper_ids) != len(set(paper_ids)):
+                raise HTTPException(422, "사용자 지정 범위에는 중복 없는 논문 ID 목록이 필요합니다.")
+        else:
+            paper_ids = dataset.splits[body.scope]
+            if body.paper_ids is not None and set(body.paper_ids) != set(paper_ids):
+                raise HTTPException(422, "고정 평가 범위와 paper_ids가 다릅니다.")
+        try:
+            report = evaluate(dataset, predictions, paper_ids, body.scope)
+        except SubmissionError as exc:
+            raise HTTPException(422, {"message": "제출 형식을 확인하세요.", "errors": exc.errors}) from None
+        async with write_lock:
+            if store.count() >= cfg.max_runs:
+                raise HTTPException(409, "평가 기록 저장 한도에 도달했습니다. 관리자가 백업 후 저장소를 정리해야 합니다.")
+            return store.create(body.name.strip(), report, predictions == dataset.demo_predictions())
+
+    @app.get("/api/runs/{run_id}")
+    def run_detail(run_id: str, request: Request):
+        need_read(request)
+        return get_run(run_id)
+
+    async def do_judge(run_id, selected):
+        semaphore = asyncio.Semaphore(cfg.judge_concurrency)
+        judge_cfg = JudgeConfig(base_url=cfg.judge_base_url, api_key=cfg.judge_api_key, model=cfg.judge_model, timeout=cfg.judge_timeout)
+
+        async def one(pid, item):
+            async with semaphore:
+                quality = await judge_item(item, judge_cfg)
+            async with write_lock:
+                run = get_run(run_id)
+                for paper in run["report"]["papers"]:
+                    if paper["paper_id"] == pid:
+                        for current in paper["items"]:
+                            if current["question_id"] == item["question_id"]:
+                                previous = copy.deepcopy(current["quality"])
+                                current["quality"] = quality
+                                break
+                recompute(run["report"])
+                run["judge_meta"]["processed"] = run["judge_meta"].get("processed", 0) + 1
+                store.save(run, {"paper_id": pid, "question_id": item["question_id"], "previous_quality": previous, "quality": quality})
+
+        try:
+            outcomes = await asyncio.gather(*(one(pid, item) for pid, item in selected), return_exceptions=True)
+            if any(isinstance(outcome, BaseException) for outcome in outcomes):
+                raise RuntimeError("One or more judge tasks could not be completed")
+        except asyncio.CancelledError:
+            async with write_lock:
+                run = get_run(run_id)
+                run["judge_meta"]["interrupted"] = True
+                run["status"] = report_status(run["report"])
+                store.save(run)
+            raise
+        except Exception:
+            # Never place provider responses or credentials in public errors.
+            async with write_lock:
+                run = get_run(run_id)
+                run["judge_meta"]["error"] = "평가 작업이 중단되었습니다. 미완료 문항을 다시 실행하세요."
+                run["status"] = "error"
+                store.save(run)
+        else:
+            async with write_lock:
+                run = get_run(run_id)
+                run["status"] = report_status(run["report"])
+                run["judge_meta"]["finished_at"] = now()
+                store.save(run)
+        finally:
+            jobs.pop(run_id, None)
+
+    @app.post("/api/runs/{run_id}/judge")
+    async def start_judge(run_id: str, request: Request):
+        need_admin(request)
+        if not cfg.judge_configured:
+            raise HTTPException(409, "서버의 JUDGE_BASE_URL과 JUDGE_MODEL을 설정하세요. 필요하면 JUDGE_API_KEY도 설정하세요.")
+        async with write_lock:
+            if jobs:
+                raise HTTPException(409, "다른 LLM 평가가 진행 중입니다. 완료 후 다시 실행하세요.")
+            run = get_run(run_id)
+            if run["report"]["dataset_version"] != dataset.version:
+                raise HTTPException(409, "데이터셋 버전이 변경되었습니다. 새 평가 기록을 생성하세요.")
+            pending = [(p["paper_id"], copy.deepcopy(i)) for p in run["report"]["papers"] for i in p["items"] if i["structure_valid"] and i["quality"]["status"] in {"pending", "needs_review", "error"}]
+            if not pending:
+                raise HTTPException(409, "LLM 평가가 필요한 문항이 없습니다.")
+            selected = pending[:cfg.judge_batch_size]
+            run["status"] = "judging"
+            run["judge_meta"] = {"model": cfg.judge_model, "started_at": now(), "total": len(selected), "processed": 0, "remaining_after_batch": len(pending) - len(selected)}
+            store.save(run)
+            jobs[run_id] = asyncio.create_task(do_judge(run_id, selected))
+        return {"status": "judging", "count": len(selected), "remaining_after_batch": len(pending) - len(selected)}
+
+    @app.post("/api/runs/{run_id}/reviews")
+    async def review(run_id: str, body: dict, request: Request):
+        need_admin(request)
+        async with write_lock:
+            if run_id in jobs:
+                raise HTTPException(409, "LLM 평가가 끝난 뒤 수동 검수를 저장하세요.")
+            run = get_run(run_id)
+            item = next((i for p in run["report"]["papers"] if p["paper_id"] == body.get("paper_id") for i in p["items"] if i["question_id"] == body.get("question_id")), None)
+            if item is None:
+                raise HTTPException(404, "해당 문항을 찾을 수 없습니다.")
+            if not item["structure_valid"]:
+                raise HTTPException(422, "구조 오류는 수동 점수로 덮어쓸 수 없습니다. 생성 결과를 수정해 새로 제출하세요.")
+            previous = copy.deepcopy(item["quality"])
+            payload = {k: v for k, v in body.items() if k not in {"paper_id", "question_id"}}
+            try:
+                quality = quality_from_review(item, payload, source="human")
+            except (ValueError, TypeError) as exc:
+                raise HTTPException(422, str(exc)[:500]) from None
+            item["quality"] = quality
+            recompute(run["report"])
+            run["status"] = report_status(run["report"])
+            return store.save(run, {"paper_id": body["paper_id"], "question_id": body["question_id"], "previous_quality": previous, "quality": quality})
+
+    @app.get("/api/runs/{run_id}/export")
+    def export(run_id: str, request: Request, format: Literal["json", "csv"] = "json"):
+        need_read(request)
+        run = get_run(run_id)
+        if format == "json":
+            run["review_history"] = store.review_history(run_id)
+            return Response(json.dumps(run, ensure_ascii=False, indent=2), media_type="application/json", headers={"Content-Disposition": f'attachment; filename="paperlingo-{run_id}.json"'})
+        buffer = io.StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow(["paper_id", "question_id", "expression", "matched", "structure_valid", "quality_status", "quality_source", "quality_score_pct", "accepted_options", "answer_id", "issues", "rationale"])
+        for paper in run["report"]["papers"]:
+            if not paper["items"]:
+                writer.writerow([csv_value(paper["paper_id"]), "", "", "", "", "empty_submission" if paper["submitted"] else "missing_submission"] + [""] * 6)
+            for item in paper["items"]:
+                q = item["quality"]
+                writer.writerow([csv_value(x) for x in [paper["paper_id"], item["question_id"], item["expression_text"], item["matched"], item["structure_valid"], q["status"], q["source"], None if q["q"] is None else round(q["q"] * 100, 2), ",".join(q.get("accepted_option_ids", [])), item.get("answer_id", ""), "; ".join(i["message"] for i in item["issues"]), q.get("rationale", "")]])
+        return Response("\ufeff" + buffer.getvalue(), media_type="text/csv; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="paperlingo-{run_id}.csv"'})
+
+    static = Path(__file__).parent / "static"
+    static.mkdir(exist_ok=True)
+    app.mount("/static", StaticFiles(directory=static), name="static")
+
+    @app.get("/")
+    def index():
+        return FileResponse(static / "index.html")
+
+    return app

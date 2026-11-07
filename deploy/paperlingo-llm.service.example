@@ -1,0 +1,19 @@
+[Unit]
+Description=PaperLingo offline Qwen3 judge
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/git/PaperLingo_Benchmark
+ExecStart=%h/git/PaperLingo_Benchmark/.venv-llm/bin/python scripts/local_judge_server.py --model-path Qwen/Qwen3-8B --model-name Qwen/Qwen3-8B --port 11434 --context-limit 8192 --output-limit 3072
+Environment=HF_HUB_OFFLINE=1
+Environment=TRANSFORMERS_OFFLINE=1
+Environment=HF_HUB_DISABLE_TELEMETRY=1
+Environment=PYTHONUNBUFFERED=1
+Environment=TOKENIZERS_PARALLELISM=false
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=20
+
+[Install]
+WantedBy=default.target
