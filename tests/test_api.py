@@ -160,6 +160,37 @@ def test_manual_ambiguity_gates_to_zero(client):
     assert quality["q"] == 0
 
 
+def test_manual_answer_correction_recomputes_zero_quality_and_keeps_audit(client):
+    run = create_demo(client)
+    valid = [(p, i) for p in run["report"]["papers"] for i in p["items"] if i["structure_valid"]]
+    assert len(valid) == 2
+    # Reproduce the reported state: all four rubric scores are 2 and all gates
+    # are true, but the sole accepted option differs from the generator's key.
+    for (paper, item), selected in zip(valid, ("B", "D")):
+        assert item["answer_id"] == "A"
+        result = client.post(f'/api/runs/{run["id"]}/reviews', headers=HEADERS,
+                             json=review_payload(paper, item, accepted_option_ids=[selected]))
+        assert result.status_code == 200, result.text
+    zero = client.get(f'/api/runs/{run["id"]}').json()
+    assert zero["status"] == "complete"
+    assert zero["report"]["metrics"]["quality_matched_pct"] == 0
+    assert zero["report"]["metrics"]["final_score"] == 0
+    # Correcting the accepted options must update the stored aggregate, while
+    # preserving the intentional structural failure and previous review history.
+    for paper, item in valid:
+        result = client.post(f'/api/runs/{run["id"]}/reviews', headers=HEADERS,
+                             json=review_payload(paper, item))
+        assert result.status_code == 200, result.text
+    updated = client.get(f'/api/runs/{run["id"]}/export').json()
+    assert updated["status"] == "complete"
+    assert updated["report"]["metrics"]["quality_matched_pct"] == pytest.approx(200 / 3)
+    assert updated["report"]["metrics"]["final_score"] == pytest.approx(200 / 9)
+    history = updated["review_history"]
+    assert len(history) == 4
+    assert [entry["previous_quality"]["accepted_option_ids"] for entry in history[2:]] == [["B"], ["D"]]
+    assert all(entry["quality"]["q"] == 1 for entry in history[2:])
+
+
 def test_no_llm_call_without_configuration(client):
     run = create_demo(client)
     result = client.post(f'/api/runs/{run["id"]}/judge', headers=HEADERS)

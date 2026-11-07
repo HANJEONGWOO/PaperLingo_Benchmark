@@ -51,6 +51,43 @@ function setBusy(button, busy, label) {
   if (busy) { button.dataset.previousLabel = button.textContent; button.disabled = true; button.replaceChildren(node("span", "busy-spin"), document.createTextNode(label)); }
   else { button.disabled = false; button.textContent = button.dataset.previousLabel || label; }
 }
+function optionLabel(item, id) {
+  const option = (Array.isArray(item.options) ? item.options : []).find(value => value && value.id === id);
+  return option ? `${id} · ${option.text}` : String(id ?? "없음");
+}
+function explainQuality(item, quality) {
+  const rubric = quality.rubric || {};
+  const rubricComplete = Object.keys(rubricLabels).every(key => Number.isInteger(rubric[key]) && rubric[key] >= 0 && rubric[key] <= 2);
+  const rubricTotal = rubricComplete ? Object.keys(rubricLabels).reduce((sum, key) => sum + rubric[key], 0) : null;
+  const reasons = [];
+  if (item.structure_valid === false) reasons.push("입력 구조 오류로 문항 품질이 0점 처리되었습니다. 위의 구조 오류를 확인하세요.");
+  else {
+    const accepted = Array.isArray(quality.accepted_option_ids) ? quality.accepted_option_ids : [];
+    if (!accepted.length) reasons.push("정답으로 허용한 보기가 없습니다.");
+    else if (accepted.length > 1) reasons.push(`정답으로 허용한 보기가 ${accepted.length}개여서 단일 정답 조건을 충족하지 않습니다.`);
+    else if (accepted[0] !== item.answer_id) reasons.push(`허용한 정답 (${optionLabel(item, accepted[0])})이 생성기 지정 정답 (${optionLabel(item, item.answer_id)})과 다릅니다.`);
+    const gateReasons = { context_sufficient: "제공된 문맥이 충분하지 않다고 판정했습니다.", no_specialist_knowledge: "외부 전문 지식이 필요하다고 판정했습니다.", no_answer_leak: "정답을 직접 알려주는 표시나 설명이 있다고 판정했습니다." };
+    Object.entries(gateReasons).forEach(([key, reason]) => { if (quality.gates?.[key] === false) reasons.push(reason); });
+    if (rubricComplete && rubricTotal === 0) reasons.push("네 가지 품질 항목의 합계가 0점입니다.");
+  }
+  return { reasons, rubricComplete, rubricTotal, score: rubricComplete ? reasons.length ? 0 : rubricTotal / 8 * 100 : null };
+}
+function updateReviewPreview() {
+  if (!state.review) return;
+  const form = $("#review-form"), rubric = {}, gates = {};
+  Object.keys(rubricLabels).forEach(key => { const value = form.elements[key]?.value; rubric[key] = value === "" || value === undefined ? null : Number(value); });
+  ["context_sufficient", "no_specialist_knowledge", "no_answer_leak"].forEach(key => { gates[key] = form.elements[key].checked; });
+  const accepted = $$("input[name=accepted_option]:checked", form).map(input => input.value);
+  const result = explainQuality(state.review.item, { accepted_option_ids: accepted, rubric, gates });
+  const box = $("#review-preview");
+  box.className = `review-preview${result.score === 0 ? " zero" : result.score > 0 ? " positive" : ""}`;
+  box.replaceChildren(node("strong", "review-preview-title", result.score === null ? "저장 예상 품질 · 검수 미완성" : `저장 예상 품질 · ${percent(result.score)}`));
+  box.append(node("p", "", result.rubricComplete ? `품질 항목 합계 ${result.rubricTotal} / 8점${result.score === 0 && result.rubricTotal > 0 ? " · 필수 통과 조건을 충족하지 않아 0%입니다." : ""}` : "네 가지 품질 항목의 점수를 모두 선택하면 예상 점수를 표시합니다."));
+  if (result.reasons.length) {
+    box.append(node("p", "preview-reason-heading", result.score === null ? "현재 판정에서 0점으로 처리되는 조건" : "0점 처리 이유"));
+    const list = node("ul", "score-reasons"); result.reasons.forEach(reason => list.append(node("li", "", reason))); box.append(list);
+  } else if (result.score !== null) box.append(node("p", "", "허용한 정답이 생성기 지정 정답과 일치하고, 필수 조건을 모두 충족합니다."));
+}
 
 function navigate(page, updateHash = true) {
   if (!(page in pageLabels)) page = "evaluate";
@@ -299,6 +336,15 @@ function renderQuestion(paper, item) {
     if (option.id === item.answer_id) optionNode.append(node("span", "answer-tag", "생성기 정답")); options.append(optionNode);
   }); card.append(options);
   if (item.issues?.length) { const issues = node("div", "issue-list"); item.issues.forEach(issue => issues.append(node("p", "", `${issue.code} · ${issue.message}`))); card.append(issues); }
+  if (quality.status === "complete" && quality.q === 0) {
+    const explanation = explainQuality(item, quality), box = node("div", "zero-quality-reason");
+    box.append(node("strong", "", "품질 0% · 처리 이유"));
+    const list = node("ul", "score-reasons");
+    const reasons = explanation.reasons.length ? explanation.reasons : ["필수 통과 조건 또는 품질 항목의 판정에 따라 0점 처리되었습니다. 검수 근거를 확인하세요."];
+    reasons.forEach(reason => list.append(node("li", "", reason))); box.append(list);
+    if (explanation.rubricTotal > 0) box.append(node("p", "", `품질 항목 합계가 ${explanation.rubricTotal} / 8점이어도 필수 통과 조건을 충족해야 득점합니다.`));
+    card.append(box);
+  }
   if (quality.source || quality.rationale || quality.option_assessments?.length) {
     const detail = node("details", "quality-detail");
     detail.append(node("summary", "", `검수 근거${quality.source === "human" ? ` · 사람 / ${quality.reviewer || ""}` : quality.source === "llm" ? " · LLM" : quality.source === "structural" ? " · 구조 검증" : ""}`));
@@ -394,7 +440,8 @@ async function compareRuns() {
 function openReview(paper, item) {
   state.review = { paper, item, runId: state.run.id };
   const form = $("#review-form"); form.reset();
-  $("#review-expression").textContent = `${item.expression_text} · 생성기 정답 ${item.answer_id}`;
+  $("#review-expression").textContent = item.expression_text;
+  $("#review-answer-key").textContent = optionLabel(item, item.answer_id);
   const replacement = contextNode(item.context); replacement.id = "review-context"; $("#review-context").replaceWith(replacement);
   const quality = item.quality || {}, options = $("#review-options"); options.replaceChildren();
   item.options.forEach(option => { const label = node("label", "review-option"), input = node("input"); input.type = "checkbox"; input.name = "accepted_option"; input.value = option.id; input.checked = (quality.accepted_option_ids || []).includes(option.id); label.append(input, node("span", "", `${option.id}. ${option.text}`)); options.append(label); });
@@ -410,7 +457,7 @@ function openReview(paper, item) {
   let storedReviewer = ""; try { storedReviewer = localStorage.getItem("paperlingo_reviewer") || ""; } catch { /* Storage can be unavailable in private mode. */ }
   $("#reviewer-name").value = quality.source === "human" ? quality.reviewer || storedReviewer : storedReviewer;
   $("#review-rationale").value = quality.source === "human" ? quality.rationale || "" : "";
-  showMessage("#review-error", ""); $("#review-dialog").showModal();
+  showMessage("#review-error", ""); updateReviewPreview(); $("#review-dialog").showModal();
 }
 async function submitReview(event) {
   event.preventDefault();
@@ -496,6 +543,7 @@ function bindEvents() {
   $("#compare-button").addEventListener("click", compareRuns);
   $("#review-close").addEventListener("click", () => $("#review-dialog").close());
   $("#review-form").addEventListener("submit", submitReview);
+  $("#review-form").addEventListener("change", event => { if (event.target.name === "accepted_option" || event.target.name in rubricLabels || ["context_sufficient", "no_specialist_knowledge", "no_answer_leak"].includes(event.target.name)) updateReviewPreview(); });
   let searchTimer;
   $("#dataset-search").addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => { state.datasetPage = 0; loadDataset(); }, 280); });
   $("#dataset-prev").addEventListener("click", () => { state.datasetPage--; loadDataset(); });

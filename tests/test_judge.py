@@ -61,9 +61,11 @@ def response_for(payload, **extra):
     })
 
 
-def test_manual_quality_uses_same_code_gate(item, human_review):
+@pytest.mark.parametrize("distinctness,expected", [(1, 7 / 8), (2, 1)])
+def test_manual_quality_uses_same_code_gate(item, human_review, distinctness, expected):
+    human_review["rubric"]["distinctness"] = distinctness
     result = quality_from_review(item, human_review)
-    assert result["q"] == 7 / 8
+    assert result["q"] == expected
     assert result["reviewer"] == "정우"
     assert result["source"] == "human"
     assert len(result["option_assessments"]) == 4
@@ -78,14 +80,30 @@ def test_ambiguity_is_completed_zero_not_high_rubric(item, llm_review):
     assert result["accepted_option_ids"] == ["A", "B"]
 
 
-def test_wrong_unique_key_is_zero(item, llm_review):
+@pytest.mark.parametrize("source", ["human", "llm"])
+def test_wrong_unique_key_is_zero_even_with_max_rubric(item, llm_review, human_review, source):
     item["answer_id"] = "B"
-    assert quality_from_review(item, llm_review, "llm")["q"] == 0
+    review = human_review if source == "human" else llm_review
+    review["rubric"] = {criterion: 2 for criterion in review["rubric"]}
+    result = quality_from_review(item, review, source)
+    assert result["accepted_option_ids"] == ["A"]
+    assert result["status"] == "complete"
+    assert result["q"] == 0
 
 
-def test_no_acceptable_answer_is_zero(item, llm_review):
-    llm_review["option_assessments"][0]["verdict"] = "incorrect"
-    assert quality_from_review(item, llm_review, "llm")["q"] == 0
+@pytest.mark.parametrize("source", ["human", "llm"])
+def test_no_acceptable_answer_is_zero(item, llm_review, human_review, source):
+    if source == "human":
+        human_review["accepted_option_ids"] = []
+        review = human_review
+    else:
+        llm_review["option_assessments"][0]["verdict"] = "incorrect"
+        review = llm_review
+    review["rubric"] = {criterion: 2 for criterion in review["rubric"]}
+    result = quality_from_review(item, review, source)
+    assert result["accepted_option_ids"] == []
+    assert result["status"] == "complete"
+    assert result["q"] == 0
 
 
 @pytest.mark.parametrize("gate", ["context_sufficient", "no_specialist_knowledge", "no_answer_leak"])
