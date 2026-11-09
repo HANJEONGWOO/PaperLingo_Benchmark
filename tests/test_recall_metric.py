@@ -28,11 +28,11 @@ SUBMITTED = ["consistent with", "similar to", "a function of", "associated with"
 def create_app(settings):
     """Keep denominator fixtures fixed while public scopes use the new names.
 
-    Production 70/30 partitioning is tested separately. Here train has two gold
-    expressions and demo has three, including the deliberately omitted paper.
+    Production partitioning is tested separately. Each scope here has one
+    paper so review assertions stay focused on the submitted items.
     """
     app = create_web_app(settings)
-    app.state.dataset.splits = {"demo": ["p1", "p2"], "train": ["p1"], "evaluation": ["p2"]}
+    app.state.dataset.splits = {"demo": ["p1"], "evaluation": ["p2"]}
     return app
 
 
@@ -68,7 +68,7 @@ def items(run):
     return [item for paper in run["report"]["papers"] for item in paper["items"]]
 
 
-def submit(client, *, count=3, scope="train"):
+def submit(client, *, count=3, scope="demo"):
     return client.post("/api/runs", headers=HEADERS, json={
         "name": "회수율 지표 회귀 검사", "scope": scope,
         "predictions": predictions(count),
@@ -148,7 +148,7 @@ def test_new_compact_five_questions_use_recall_not_precision(settings):
         response = submit(client, count=5)
         assert response.status_code == 201, response.text
         run = response.json()
-        assert run["report"]["scope"] == {"name": "train", "paper_ids": ["p1"], "paper_count": 1}
+        assert run["report"]["scope"] == {"name": "demo", "paper_ids": ["p1"], "paper_count": 1}
         assert run["report"]["metrics_version"] == NEW_VERSION
         assert all(item["structure_valid"] for item in items(run))
         skipped = client.post(f'/api/runs/{run["id"]}/skip-judge', headers=HEADERS)
@@ -183,7 +183,9 @@ def test_new_compact_five_questions_use_recall_not_precision(settings):
 
 
 def test_recall_denominator_uses_actual_labels_including_missing_papers(settings):
-    with TestClient(create_app(settings)) as client:
+    app = create_app(settings)
+    app.state.dataset.splits = {"demo": ["p1", "p2"], "evaluation": []}
+    with TestClient(app) as client:
         response = submit(client, count=3, scope="demo")
         assert response.status_code == 201
         run = response.json()

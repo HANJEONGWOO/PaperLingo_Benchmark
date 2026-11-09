@@ -7,7 +7,6 @@ from copy import deepcopy
 import hashlib
 import json
 from pathlib import Path
-import random
 import re
 
 
@@ -47,8 +46,9 @@ def occurrences(abstract: str, text: str, *, whole_words: bool = False) -> list[
 class Dataset:
     """Load original JSONL files without modifying them or repairing labels."""
 
-    SPLIT_SEED = 42
-    SPLIT_VERSION = "train-evaluation-v1"
+    SPLIT_VERSION = "example-evaluation-v2"
+    EXAMPLE_PAPER_IDS = ("0911.3369", "1109.3182", "1709.01217")
+    EXAMPLE_ANSWER_VERSION = "authored-demo-v1"
 
     def __init__(self, data_dir: Path):
         self.data_dir = Path(data_dir)
@@ -163,7 +163,7 @@ class Dataset:
             "warnings": warnings,
         }
 
-        preferred = [paper_id for paper_id in ("0911.3369", "1109.3182") if paper_id in self.papers and self.labels[paper_id]]
+        preferred = [paper_id for paper_id in self.EXAMPLE_PAPER_IDS[:2] if paper_id in self.papers and self.labels[paper_id]]
         for paper_id in sorted(self.papers):
             if len(preferred) >= 2:
                 break
@@ -171,28 +171,30 @@ class Dataset:
                 preferred.append(paper_id)
         empty = [paper_id for paper_id in sorted(self.papers) if not self.labels[paper_id]]
         if empty:
-            preferred.append("1709.01217" if "1709.01217" in empty else empty[0])
-        self.splits: dict[str, list[str]] = {"demo": preferred, "train": [], "evaluation": []}
+            preferred.append(self.EXAMPLE_PAPER_IDS[2] if self.EXAMPLE_PAPER_IDS[2] in empty else empty[0])
+        for paper_id in sorted(self.papers):
+            if len(preferred) >= 3:
+                break
+            if paper_id not in preferred:
+                preferred.append(paper_id)
         demo_ids = set(preferred)
-        by_domain = defaultdict(list)
-        for paper_id, paper in self.papers.items():
-            by_domain[domain_code(paper)].append(paper_id)
-        rng = random.Random(self.SPLIT_SEED)
-        for domain in sorted(by_domain):
-            ids = sorted(by_domain[domain])
-            rng.shuffle(ids)
-            # Public demo answers must never leak into the evaluation scope.
-            # Tiny custom datasets may need extra training capacity for demos;
-            # the reference dataset has ten papers per domain and splits 7/3.
-            train_count = max(len(ids) * 7 // 10, sum(paper_id in demo_ids for paper_id in ids))
-            train, evaluation = ids[:train_count], ids[train_count:]
-            replacements = [index for index, paper_id in enumerate(train) if paper_id not in demo_ids]
-            for index, paper_id in enumerate(evaluation):
-                if paper_id in demo_ids:
-                    replacement = replacements.pop()
-                    train[replacement], evaluation[index] = paper_id, train[replacement]
-            self.splits["train"].extend(train)
-            self.splits["evaluation"].extend(evaluation)
+        # Keep only the public format examples outside evaluation. The demo
+        # scope ID stays stable for existing sample files and saved reports.
+        self.splits: dict[str, list[str]] = {
+            "demo": preferred,
+            "evaluation": sorted(set(self.papers) - demo_ids),
+        }
+
+    def example_answer_metadata(self) -> dict:
+        return {
+            "version": self.EXAMPLE_ANSWER_VERSION,
+            "authorship": "manually authored format examples covering every example reference",
+            "scope": "demo",
+            "submission_format": "compact-v1",
+            "quality_status": "code-checked",
+            "quality_policy_version": "code-basic-v1",
+            "semantic_reviewed": False,
+        }
 
     def summary(self) -> dict:
         return {
@@ -201,7 +203,6 @@ class Dataset:
             "domain_count": len({domain_code(paper) for paper in self.papers.values()}),
             "zero_gold_count": sum(not expressions for expressions in self.labels.values()),
             "version": self.version,
-            "split_seed": self.SPLIT_SEED,
             "split_version": self.SPLIT_VERSION,
             "splits": {key: len(ids) for key, ids in self.splits.items()},
             "audit": deepcopy(self.audit),

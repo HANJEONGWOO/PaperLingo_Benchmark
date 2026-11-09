@@ -29,7 +29,7 @@ from .judge import JudgeConfig, judge_item, quality_from_review, temporary_quali
 from .scoring import METRICS_VERSION, SubmissionError, evaluate, recompute
 from .storage import Store, now, report_status
 
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 COOKIE = "paperlingo_session"
 
 
@@ -76,7 +76,7 @@ class LoginInput(BaseModel):
 class RunInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=1, max_length=120)
-    scope: Literal["demo", "train", "evaluation"]
+    scope: Literal["demo", "evaluation"]
     paper_ids: list[str] | None = None
     predictions: str | list[dict[str, Any]]
 
@@ -310,17 +310,15 @@ def create_app(settings: Settings | None = None):
     @app.get("/api/splits")
     def splits(request: Request, download: bool = False):
         need_read(request)
-        from .training_answers import training_answer_metadata
         manifest = {"dataset_version": dataset.version, "split_version": dataset.SPLIT_VERSION,
-                    "seed": dataset.SPLIT_SEED, "splits": dataset.splits,
-                    "training_answers": training_answer_metadata()}
+                    "splits": dataset.splits, "example_answers": dataset.example_answer_metadata()}
         if download:
             return Response(json.dumps(manifest, ensure_ascii=False, indent=2), media_type="application/json", headers={"Content-Disposition": 'attachment; filename="paperlingo-splits.json"'})
         return manifest
 
     @app.get("/api/papers")
     def papers(request: Request, q: str = "", offset: int = 0, limit: int = 20, domain: str = "",
-               scope: Literal["train", "evaluation"] = "train"):
+               scope: Literal["demo", "evaluation"] = "demo"):
         need_read(request)
         q = q[:200].casefold()
         rows = []
@@ -352,7 +350,7 @@ def create_app(settings: Settings | None = None):
         return paper
 
     @app.get("/api/datasets/{scope}/{kind}")
-    def download_dataset(request: Request, scope: Literal["train", "evaluation"],
+    def download_dataset(request: Request, scope: Literal["demo", "evaluation"],
                          kind: Literal["papers", "labels", "answers"]):
         need_read(request)
         if scope == "evaluation" and kind != "papers":
@@ -365,17 +363,15 @@ def create_app(settings: Settings | None = None):
         elif kind == "labels":
             records = [{"paper_id": pid, "expressions": dataset.labels[pid]} for pid in paper_ids]
         else:
-            from .training_answers import generate_training_answers
-            records = generate_training_answers(dataset)
+            records = dataset.demo_predictions(compact=True)
         content = "\n".join(json.dumps(record, ensure_ascii=False) for record in records) + "\n"
         headers = {
-            "Content-Disposition": f'attachment; filename="paperlingo-{scope}-{kind}.jsonl"',
+            "Content-Disposition": f'attachment; filename="paperlingo-{"example" if scope == "demo" else scope}-{kind}.jsonl"',
             "X-Dataset-Version": dataset.version,
             "X-Split-Version": dataset.SPLIT_VERSION,
         }
         if kind == "answers":
-            from .training_answers import training_answer_metadata
-            metadata = training_answer_metadata()
+            metadata = dataset.example_answer_metadata()
             headers.update({"X-Answer-Version": metadata["version"], "X-Answer-Quality": metadata["quality_status"]})
         return Response(content, media_type="application/x-ndjson", headers=headers)
 
@@ -396,7 +392,7 @@ def create_app(settings: Settings | None = None):
             "submission_format": "compact-v1",
             "input": "논문별 객체의 JSON 배열 또는 JSONL",
             "max_questions_per_paper": 5,
-            "scopes": ["demo", "train", "evaluation"],
+            "scopes": ["demo", "evaluation"],
             "required_paper_fields": ["paper_id", "questions"],
             "required_question_fields": ["expression_text", "options", "answer_id"],
             "question_fields": {

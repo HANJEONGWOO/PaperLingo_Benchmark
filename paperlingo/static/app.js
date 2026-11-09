@@ -5,7 +5,7 @@ const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const state = { session: null, config: null, judgeStatus: null, judgeStatusTimer: null, run: null, runs: [], selectedRuns: new Set(), reportPage: 0, datasetPage: 0, datasetTotal: 0, pollTimer: null, pollVersion: 0, toastTimer: null, datasetSequence: 0, review: null, isSample: false, skippingRunId: null };
 const PAGE_SIZE = 10;
 const pageLabels = { evaluate: msg("모델 평가"), history: msg("평가 기록"), dataset: msg("참조 데이터"), method: msg("평가 기준") };
-const scopeLabels = { demo: msg("형식 예제"), train: msg("학습"), evaluation: msg("평가"), development: msg("개발"), validation: msg("검증"), test: msg("최종 평가"), all: msg("전체"), custom: msg("직접 지정") };
+const scopeLabels = { demo: msg("예시 데이터"), train: msg("학습 (이전 범위)"), evaluation: msg("평가"), development: msg("개발"), validation: msg("검증"), test: msg("최종 평가"), all: msg("전체"), custom: msg("직접 지정") };
 const statusLabels = { awaiting_review: msg("검수 대기"), queued: msg("자동 검수 대기"), judging: msg("자동 검수 중"), complete: msg("완료"), needs_review: msg("재검토 필요"), error: msg("검수 오류"), pending: msg("검수 대기") };
 const rubricLabels = { plausibility: msg("오답의 그럴듯함"), learning_alignment: msg("학습 목표 관련성"), distinctness: msg("오답 간 구별성"), no_cues: msg("불필요한 정답 단서 억제") };
 const rubricDescriptions = { plausibility: msg("B1–B2 학습자가 혼동할 만한 오답인가요?"), learning_alignment: msg("목표 어휘·결합·문법 지식으로 구별하나요?"), distinctness: msg("세 오답이 구별되며 불필요하게 반복되지 않나요?"), no_cues: msg("길이·표기·형식만으로 정답이 드러나지 않나요?") };
@@ -142,7 +142,7 @@ async function initialize() {
     I18n.setText($("#stat-papers"), () => number(summary.paper_count));
     I18n.setText($("#stat-expressions"), () => number(summary.expression_count));
     I18n.setText($("#stat-domains"), () => number(summary.domain_count));
-    ["train", "evaluation"].forEach(scope => {
+    ["demo", "evaluation"].forEach(scope => {
       const value = summary.splits?.[scope];
       I18n.setText($("#dataset-size-" + scope), () => value === undefined ? "—" : number(Array.isArray(value) ? value.length : value));
     });

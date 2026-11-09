@@ -20,22 +20,19 @@ def test_real_reference_integrity_and_splits():
     assert summary["expression_count"] == 6188
     assert summary["domain_count"] == 149
     assert summary["zero_gold_count"] == 12
-    assert summary["splits"] == {"demo": 3, "train": 1043, "evaluation": 447}
-    assert summary["split_version"] == Dataset.SPLIT_VERSION == "train-evaluation-v1"
-    assert summary["split_seed"] == 42
+    assert summary["splits"] == {"demo": 3, "evaluation": 1487}
+    assert summary["split_version"] == Dataset.SPLIT_VERSION == "example-evaluation-v2"
     assert len(dataset.version) == 64
     assert summary["audit"]["word_boundary_flag_count"] == 0
     assert summary["audit"]["duplicate_abstract_groups"] == []
-    partitions = [set(dataset.splits[name]) for name in ("train", "evaluation")]
+    partitions = [set(dataset.splits[name]) for name in ("demo", "evaluation")]
     assert set.union(*partitions) == set(dataset.papers)
     assert not partitions[0] & partitions[1]
-    assert [len(partition) for partition in partitions] == [1043, 447]
+    assert [len(partition) for partition in partitions] == [3, 1487]
     assert dataset.splits["demo"] == ["0911.3369", "1109.3182", "1709.01217"]
     assert set(dataset.splits["demo"]) <= partitions[0]
     assert not set(dataset.splits["demo"]) & partitions[1]
-    for domain in {paper["domain"]["code"] for paper in dataset.papers.values()}:
-        counts = [sum(dataset.papers[id_]["domain"]["code"] == domain for id_ in part) for part in partitions]
-        assert counts == [7, 3]
+    assert sum(len(dataset.labels[pid]) for pid in dataset.splits["evaluation"]) == 6179
     assert dataset.splits == Dataset(DATA_DIR).splits
     assert dataset.version == Dataset(DATA_DIR).version
     assert before == {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in DATA_DIR.glob("*.jsonl")}
@@ -145,13 +142,13 @@ def test_dataset_version_changes_with_label_edits(tmp_path):
 
 def test_split_configuration_does_not_change_source_dataset_version(monkeypatch):
     original = Dataset(DATA_DIR)
-    monkeypatch.setattr(Dataset, "SPLIT_SEED", 43)
+    monkeypatch.setattr(Dataset, "EXAMPLE_PAPER_IDS", ("2208.09462", "1109.3182", "1709.01217"))
     monkeypatch.setattr(Dataset, "SPLIT_VERSION", "test-alternate-policy")
     alternate = Dataset(DATA_DIR)
     assert alternate.splits != original.splits
     assert alternate.version == original.version
     assert alternate.summary()["split_version"] == "test-alternate-policy"
-    assert set(alternate.splits["demo"]) <= set(alternate.splits["train"])
+    assert not set(alternate.splits["demo"]) & set(alternate.splits["evaluation"])
 
 
 def test_splits_ignore_source_row_order_and_preserve_references(tmp_path):
@@ -170,19 +167,17 @@ def test_splits_ignore_source_row_order_and_preserve_references(tmp_path):
     write_fixture(tmp_path, list(reversed(papers)), list(reversed(labels)))
     reordered = Dataset(tmp_path)
     assert reordered.splits == original.splits
-    for domain in ("first", "second"):
-        assert [
-            sum(reordered.papers[paper_id]["domain"] == domain for paper_id in reordered.splits[split])
-            for split in ("train", "evaluation")
-        ] == [7, 3]
+    assert len(reordered.splits["demo"]) == 3
+    assert len(reordered.splits["evaluation"]) == 17
+    assert set(reordered.splits["demo"]) | set(reordered.splits["evaluation"]) == set(reordered.papers)
 
 
-def test_tiny_dataset_keeps_all_public_demo_papers_in_training(tmp_path):
+def test_tiny_dataset_keeps_public_examples_out_of_evaluation(tmp_path):
     papers = [{"paper_id": "p", "abstract": "A valuable result."}]
     labels = [{"paper_id": "p", "expressions": [{"text": "valuable"}]}]
     write_fixture(tmp_path, papers, labels)
     dataset = Dataset(tmp_path)
-    assert dataset.splits == {"demo": ["p"], "train": ["p"], "evaluation": []}
+    assert dataset.splits == {"demo": ["p"], "evaluation": []}
 
 
 def test_search_returns_summary_not_entire_dataset():

@@ -22,14 +22,14 @@ EXPRESSIONS = ["consistent with", "depend on", "a function of", "similar to"]
 
 
 def create_app(settings):
-    """Pin small semantic scopes independently of production 70/30 sampling.
+    """Pin small semantic scopes independently of the production partition.
 
-    These tests exercise queueing and review lifecycles. Dataset split ratios
+    These tests exercise queueing and review lifecycles. Dataset partitions
     have separate tests; deterministic one-paper scopes keep these assertions
     about the same submitted items after the public scope simplification.
     """
     app = create_web_app(settings)
-    app.state.dataset.splits = {"demo": ["p1", "p2"], "train": ["p1"], "evaluation": ["p2"]}
+    app.state.dataset.splits = {"demo": ["p1"], "evaluation": ["p2"]}
     return app
 
 
@@ -66,7 +66,7 @@ def predictions(count=3, paper_id="p1", invalid=False):
 
 
 def upload(client, count=3, paper_id="p1", invalid=False):
-    scope = {"p1": "train", "p2": "evaluation"}[paper_id]
+    scope = {"p1": "demo", "p2": "evaluation"}[paper_id]
     response = client.post("/api/runs", headers=HEADERS, json={
         "name": "자동화 모의 검증", "scope": scope,
         "predictions": predictions(count, paper_id, invalid),

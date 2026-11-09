@@ -1,4 +1,4 @@
-"""Aligned training downloads and held-out evaluation references."""
+"""Aligned example downloads and held-out evaluation references."""
 
 import json
 
@@ -25,11 +25,11 @@ def read_download(client, scope, kind):
     assert response.headers["content-type"].startswith("application/x-ndjson")
     assert "attachment" in response.headers["content-disposition"]
     assert response.headers["x-dataset-version"] == client.app.state.dataset.version
-    assert response.headers["x-split-version"] == "train-evaluation-v1"
+    assert response.headers["x-split-version"] == "example-evaluation-v2"
     return [json.loads(line) for line in response.text.splitlines()]
 
 
-@pytest.mark.parametrize("scope, count", [("train", 1043), ("evaluation", 447)])
+@pytest.mark.parametrize("scope, count", [("demo", 3), ("evaluation", 1487)])
 def test_papers_are_complete_source_subsets_without_labels(client, scope, count):
     dataset = client.app.state.dataset
     papers = read_download(client, scope, "papers")
@@ -44,10 +44,10 @@ def test_papers_are_complete_source_subsets_without_labels(client, scope, count)
         assert "abstract_original" not in paper
 
 
-def test_training_labels_remain_complete_and_aligned(client):
+def test_example_labels_remain_complete_and_aligned(client):
     dataset = client.app.state.dataset
-    labels = read_download(client, "train", "labels")
-    assert [row["paper_id"] for row in labels] == dataset.splits["train"]
+    labels = read_download(client, "demo", "labels")
+    assert [row["paper_id"] for row in labels] == dataset.splits["demo"]
     for label in labels:
         assert label == {"paper_id": label["paper_id"], "expressions": dataset.labels[label["paper_id"]]}
     assert any(row["expressions"] for row in labels)
@@ -61,10 +61,11 @@ def test_evaluation_reference_downloads_cannot_be_requested_directly(client, kin
     assert "content-disposition" not in response.headers
 
 
-def test_training_answers_cover_all_training_labels_and_are_valid_submissions(client):
+def test_example_answers_cover_all_example_labels_and_are_valid_submissions(client):
     dataset = client.app.state.dataset
-    answers = read_download(client, "train", "answers")
-    assert [row["paper_id"] for row in answers] == dataset.splits["train"]
+    answers = read_download(client, "demo", "answers")
+    assert answers == client.get("/api/sample").json()["predictions"]
+    assert [row["paper_id"] for row in answers] == dataset.splits["demo"]
     for row in answers:
         assert set(row) == {"paper_id", "questions"}
         assert len(row["questions"]) <= 5
@@ -73,59 +74,79 @@ def test_training_answers_cover_all_training_labels_and_are_valid_submissions(cl
             assert set(question) == {"expression_text", "options", "answer_id"}
             assert len(set(question["options"])) == 4
             assert type(question["answer_id"]) is int and 0 <= question["answer_id"] <= 3
-    report = evaluate(dataset, answers, dataset.splits["train"], "train")
+    report = evaluate(dataset, answers, dataset.splits["demo"], "demo")
     assert report["metrics"]["recall_pct"] == 100
     assert report["metrics"]["structural_validity_pct"] == 100
     assert report["metrics"]["final_score"] is None  # No invented quality validation.
-    headers = client.get("/api/datasets/train/answers").headers
-    assert headers["x-answer-version"] == "rule-based-v1"
-    assert headers["x-answer-quality"] == "unreviewed"
+    headers = client.get("/api/datasets/demo/answers").headers
+    assert headers["x-answer-version"] == "authored-demo-v1"
+    assert headers["x-answer-quality"] == "code-checked"
     assert client.get("/api/datasets/evaluation/answers").status_code == 404
     assert client.get("/api/runs").json()["items"] == []  # Downloading never starts inference.
 
 
 def test_manifest_and_explorer_use_only_new_scopes(client):
     manifest = client.get("/api/splits?download=1").json()
-    assert manifest["split_version"] == "train-evaluation-v1"
-    assert manifest["training_answers"]["quality_status"] == "unreviewed"
-    assert set(manifest["splits"]) == {"demo", "train", "evaluation"}
-    assert set(manifest["splits"]["demo"]) <= set(manifest["splits"]["train"])
-    assert not set(manifest["splits"]["train"]) & set(manifest["splits"]["evaluation"])
-    assert client.get("/api/papers").json()["total"] == 1043
-    for scope, count in (("train", 1043), ("evaluation", 447)):
+    assert manifest["split_version"] == "example-evaluation-v2"
+    assert manifest["example_answers"]["quality_status"] == "code-checked"
+    assert manifest["example_answers"]["semantic_reviewed"] is False
+    assert client.get("/api/schema").json()["scopes"] == ["demo", "evaluation"]
+    assert set(manifest["splits"]) == {"demo", "evaluation"}
+    assert len(manifest["splits"]["demo"]) == 3
+    assert not set(manifest["splits"]["demo"]) & set(manifest["splits"]["evaluation"])
+    assert client.get("/api/papers").json()["total"] == 3
+    for scope, count in (("demo", 3), ("evaluation", 1487)):
         response = client.get("/api/papers", params={"scope": scope, "limit": 100, "offset": count - 3}).json()
         assert response["total"] == count
         assert len(response["items"]) == 3
         assert all(row["paper_id"] in manifest["splits"][scope] for row in response["items"])
         pid = response["items"][0]["paper_id"]
         detail = client.get(f"/api/papers/{pid}").json()
-        assert ("expressions" in detail) == (scope == "train")
-        assert all(("gold_count" in row) == (scope == "train") for row in response["items"])
+        assert ("expressions" in detail) == (scope == "demo")
+        assert all(("gold_count" in row) == (scope == "demo") for row in response["items"])
     assert client.get("/api/papers?scope=all").status_code == 422
+    assert client.get("/api/papers?scope=train").status_code == 422
 
 
-@pytest.mark.parametrize("scope", ["development", "validation", "test", "all", "custom"])
+@pytest.mark.parametrize("kind", ["papers", "labels", "answers"])
+def test_retired_training_downloads_do_not_expose_moved_papers(client, kind):
+    response = client.get(f"/api/datasets/train/{kind}")
+    assert response.status_code == 422
+    assert "content-disposition" not in response.headers
+
+
+def test_former_training_paper_is_now_private_evaluation_data(client):
+    # This paper was in the previously published 70% training partition.
+    paper_id = "2208.09462"
+    assert paper_id in client.app.state.dataset.splits["evaluation"]
+    for query in ("", "?scope=train", "?scope=demo"):
+        detail = client.get(f"/api/papers/{paper_id}{query}").json()
+        assert detail["reference_hidden"] is True
+        assert "expressions" not in detail
+
+
+@pytest.mark.parametrize("scope", ["train", "development", "validation", "test", "all", "custom"])
 def test_retired_scopes_cannot_create_new_runs(client, scope):
     response = client.post("/api/runs", headers=HEADERS, json={"name": "old scope", "scope": scope, "predictions": []})
     assert response.status_code == 422
     assert client.get("/api/runs").json()["items"] == []
 
 
-def test_evaluation_scope_rejects_training_papers_and_cannot_shrink_denominator(client):
+def test_evaluation_scope_rejects_example_papers_and_cannot_shrink_denominator(client):
     dataset = client.app.state.dataset
     body = {"name": "scope boundary", "scope": "evaluation", "predictions": []}
     body["paper_ids"] = dataset.splits["evaluation"][:1]
     assert client.post("/api/runs", headers=HEADERS, json=body).status_code == 422
     body.pop("paper_ids")
-    body["predictions"] = [{"paper_id": dataset.splits["train"][0], "questions": []}]
+    body["predictions"] = [{"paper_id": dataset.splits["demo"][0], "questions": []}]
     assert client.post("/api/runs", headers=HEADERS, json=body).status_code == 422
     body["predictions"] = []
     result = client.post("/api/runs", headers=HEADERS, json=body)
     assert result.status_code == 201, result.text
     report = result.json()["report"]
-    assert report["scope"]["paper_count"] == report["counts"]["missing_papers"] == 447
+    assert report["scope"]["paper_count"] == report["counts"]["missing_papers"] == 1487
     assert report["counts"]["gold"] == sum(len(dataset.labels[pid]) for pid in dataset.splits["evaluation"])
-    assert report["split_version"] == "train-evaluation-v1"
+    assert report["split_version"] == "example-evaluation-v2"
     assert report["metrics"]["final_score"] == 0
 
 
@@ -190,18 +211,23 @@ def test_evaluation_scoring_still_uses_private_reference_labels(client):
     assert exported == report
 
 
-def test_historical_mixed_scope_reads_and_review_responses_hide_only_evaluation_labels(client):
+@pytest.mark.parametrize("old_scope", ["all", "train", "evaluation"])
+def test_historical_mixed_scope_reads_and_review_responses_hide_only_evaluation_labels(client, old_scope):
     dataset = client.app.state.dataset
-    train_id = dataset.splits["demo"][0]
-    eval_id = next(pid for pid in dataset.splits["evaluation"] if dataset.labels[pid])
+    example_id = dataset.splits["demo"][0]
+    eval_id = "2208.09462"  # Former training data is private even in old training records.
     expression = dataset.labels[eval_id][0]["text"]
     question = {"expression_text": expression, "options": [expression, "wrong one", "wrong two", "wrong three"], "answer_id": 0}
-    report = evaluate(dataset, [{"paper_id": eval_id, "questions": [question]}], [train_id, eval_id], "all")
+    report = evaluate(dataset, [{"paper_id": eval_id, "questions": [question]}], [example_id, eval_id], old_scope)
+    report["split_version"] = "train-evaluation-v1"
     stored = client.app.state.store.create("legacy mixed", report)
     for suffix in ("", "/export"):
         visible = client.get(f'/api/runs/{stored["id"]}{suffix}').json()["report"]
         assert visible["papers"][0] == report["papers"][0]
         assert_hidden(visible["papers"][1], dataset)
+        assert visible["scope"] == report["scope"]
+        assert visible["metrics"] == report["metrics"]
+        assert visible["split_version"] == "train-evaluation-v1"
     assert client.app.state.store.get(stored["id"]) == stored  # Read projection never rewrites storage.
     skipped = client.post(f'/api/runs/{stored["id"]}/skip-judge', headers=HEADERS).json()
     assert_hidden(skipped["report"]["papers"][1], dataset)

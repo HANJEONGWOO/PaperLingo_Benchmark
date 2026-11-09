@@ -209,12 +209,14 @@ def test_code_results_cannot_be_overwritten_and_exports_include_checks(client):
     assert all(None not in row for row in rows)
 
 
-def test_training_bulk_download_scores_without_inference(client):
-    data = client.get("/api/datasets/train/answers").text
-    run = submit(client, data, "train")
+def test_example_download_scores_full_marks_without_inference(client):
+    data = client.get("/api/datasets/demo/answers").text
+    run = submit(client, data, "demo")
     assert run["status"] == "complete"
-    assert run["report"]["counts"]["predicted"] == 4324
-    assert run["report"]["counts"]["code_passed"] == 4324
+    assert run["report"]["counts"]["predicted"] == 9
+    assert run["report"]["counts"]["code_passed"] == 9
+    assert run["report"]["metrics"]["recall_pct"] == 100
+    assert run["report"]["metrics"]["quality_matched_pct"] == 100
     assert run["report"]["metrics"]["final_score"] == 100
 
 

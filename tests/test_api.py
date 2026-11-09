@@ -181,13 +181,13 @@ def test_complete_demo_with_temporary_quality_scores_100(client):
 
 
 def test_missing_scope_is_not_inferred_from_submission(client):
-    sample = client.get("/api/sample").json()
-    result = client.post("/api/runs", headers=HEADERS, json={"name": "불완전 제출", "scope": "train", "predictions": sample["predictions"]})
+    dataset = client.app.state.dataset
+    predictions = [{"paper_id": dataset.splits["evaluation"][0], "questions": []}]
+    result = client.post("/api/runs", headers=HEADERS, json={"name": "불완전 제출", "scope": "evaluation", "predictions": predictions})
     assert result.status_code == 201
     report = result.json()["report"]
-    dataset = client.app.state.dataset
-    assert report["counts"]["gold"] == sum(len(dataset.labels[pid]) for pid in dataset.splits["train"])
-    assert report["counts"]["missing_papers"] == 1040
+    assert report["counts"]["gold"] == sum(len(dataset.labels[pid]) for pid in dataset.splits["evaluation"])
+    assert report["counts"]["missing_papers"] == 1486
     assert report["metrics"]["coverage_pct"] < 1
 
 

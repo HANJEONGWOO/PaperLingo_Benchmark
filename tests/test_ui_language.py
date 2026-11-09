@@ -145,11 +145,11 @@ def test_validation_messages_translate_in_place(page):
 
 def test_data_guide_and_mobile_layout_keep_evaluation_downloads_disabled(page):
     page.locator('[data-page="dataset"]').click()
-    pw.expect(page.locator("#dataset-size-evaluation")).to_have_text("447")
+    pw.expect(page.locator("#dataset-size-evaluation")).to_have_text("1,487")
     pw.expect(page.locator("#evaluation-label-download")).to_have_text("Selected expressions ↓")
     pw.expect(page.locator("#evaluation-answer-download")).to_be_disabled()
     page.locator("#dataset-scope").select_option("evaluation")
-    pw.expect(page.locator("#dataset-count")).to_have_text("Evaluation · 447 papers")
+    pw.expect(page.locator("#dataset-count")).to_have_text("Evaluation · 1,487 papers")
     page.locator("#dataset-list summary").first.click()
     pw.expect(page.locator("#dataset-list .dataset-paper-body").first).to_contain_text("Evaluation reference expressions are private.")
     original = page.locator("#dataset-list .abstract-text").first.inner_text()
@@ -180,6 +180,39 @@ def test_switching_during_a_request_restores_translated_button_text(page):
     pw.expect(page.locator("#load-sample")).to_contain_text("예제 불러오기")
     language(page, "en")
     pw.expect(page.locator("#load-sample")).to_contain_text("Load example")
+
+
+def test_example_downloads_and_submission_score_full_marks_in_both_languages(page, tmp_path):
+    page.locator('[data-page="dataset"]').click()
+    pw.expect(page.locator("#dataset-size-demo")).to_have_text("3")
+    pw.expect(page.locator("#dataset-size-evaluation")).to_have_text("1,487")
+    assert page.locator("#dataset-scope option").evaluate_all("els => els.map(el => el.value)") == ["demo", "evaluation"]
+    assert page.locator("#scope option").evaluate_all("els => els.map(el => el.value)") == ["demo", "evaluation"]
+    downloads = {}
+    for kind in ("papers", "labels", "answers"):
+        with page.expect_download() as event:
+            page.locator(f'a[href="/api/datasets/demo/{kind}"]').click()
+        download = event.value
+        path = tmp_path / download.suggested_filename
+        download.save_as(path)
+        downloads[kind] = [json.loads(line) for line in path.read_text().splitlines()]
+        assert len(downloads[kind]) == 3
+    assert [row["paper_id"] for row in downloads["papers"]] == [row["paper_id"] for row in downloads["labels"]] == [row["paper_id"] for row in downloads["answers"]]
+    assert sum(len(row["questions"]) for row in downloads["answers"]) == 9
+    language(page, "ko")
+    pw.expect(page.locator("#example-download-description")).to_contain_text("100점")
+    page.locator('[data-page="evaluate"]').click()
+    page.locator("#run-name").fill("예시 다운로드 검증")
+    page.locator("#scope").select_option("demo")
+    page.locator("#prediction-text").fill(json.dumps(downloads["answers"], ensure_ascii=False))
+    page.locator("#evaluate-button").click()
+    pw.expect(page.locator("#report-section")).to_be_visible()
+    page.wait_for_function("state.run?.report.metrics.final_score === 100")
+    assert page.evaluate("state.run.report.counts.code_passed") == 9
+    assert page.evaluate("state.run.report.metrics.recall_pct") == 100
+    language(page, "en")
+    pw.expect(page.locator("#metric-cards")).to_contain_text("Matched-question pass rate")
+    assert page.evaluate("state.run.report.metrics.final_score") == 100
 
 
 def test_storage_denied_still_allows_switching(browser, web_url):
