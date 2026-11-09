@@ -103,7 +103,7 @@ def test_malformed_options_are_scoreable_without_server_error(client):
     response = http.post("/api/runs", headers=HEADERS, json={"name": "bad choices", "scope": "demo", "predictions": predictions})
     assert response.status_code == 201
     report = response.json()["report"]
-    assert report["counts"]["predicted"] == 3
+    assert report["counts"]["predicted"] == 9
     item = report["papers"][0]["items"][0]
     assert item["structure_valid"] is False
     assert item["quality"]["q"] == 0
@@ -131,17 +131,22 @@ def test_public_access_allows_remote_upload_and_review(tmp_path):
 
 
 def test_failed_job_does_not_release_guard_with_live_sibling_calls(tmp_path, monkeypatch):
-    state = {"active": 0}
+    state = {"active": 0, "calls": 0}
     lock = threading.Lock()
+    failure_started = threading.Event()
+    sibling_started = threading.Event()
+    release_siblings = asyncio.Event()
 
     async def unexpected_judge(item, config):
         with lock:
             state["active"] += 1
+            state["calls"] += 1
         try:
             if item["expression_text"] == "identical to":
-                await asyncio.sleep(0.02)
+                failure_started.set()
                 raise RuntimeError("simulated unexpected adapter failure")
-            await asyncio.sleep(0.25)
+            sibling_started.set()
+            await release_siblings.wait()
             return quality_from_review(item, {
                 "accepted_option_ids": [item["answer_id"]],
                 "rubric": {"plausibility": 2, "learning_alignment": 2, "distinctness": 2, "no_cues": 2},
@@ -158,10 +163,24 @@ def test_failed_job_does_not_release_guard_with_live_sibling_calls(tmp_path, mon
         sample = http.get("/api/sample").json()["predictions"]
         run = http.post("/api/runs", headers=HEADERS, json={"name": "job lifecycle", "scope": "demo", "predictions": sample}).json()
         assert run["status"] == "queued"
-        for _ in range(100):
-            if not app.state.jobs:
+        assert failure_started.wait(timeout=3)
+        assert sibling_started.wait(timeout=3)
+        assert http.portal.call(lambda: run["id"] in app.state.jobs)
+        with lock:
+            assert state["active"] > 0
+        # A failing sibling must not open a second job while others can still write.
+        duplicate = http.post(f'/api/runs/{run["id"]}/judge', headers=HEADERS)
+        assert duplicate.status_code == 200
+        assert duplicate.json()["status"] == "judging"
+        assert http.get(f'/api/runs/{run["id"]}').json()["judge_meta"]["job_id"] == run["judge_meta"]["job_id"]
+        http.portal.call(release_siblings.set)
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            if http.portal.call(lambda: not app.state.jobs):
                 break
-            time.sleep(0.01)
-        assert not app.state.jobs
+            time.sleep(0.005)
+        assert http.portal.call(lambda: not app.state.jobs)
         with lock:
             assert state["active"] == 0, "Global job guard was released while a sibling judge could still write results"
+            assert state["calls"] == 9
+        assert http.get(f'/api/runs/{run["id"]}').json()["status"] == "error"

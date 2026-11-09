@@ -5,7 +5,7 @@ const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const state = { session: null, config: null, judgeStatus: null, judgeStatusTimer: null, run: null, runs: [], selectedRuns: new Set(), reportPage: 0, datasetPage: 0, datasetTotal: 0, pollTimer: null, pollVersion: 0, toastTimer: null, datasetSequence: 0, review: null, isSample: false, skippingRunId: null };
 const PAGE_SIZE = 10;
 const pageLabels = { evaluate: "모델 평가", history: "평가 기록", dataset: "참조 데이터", method: "평가 기준" };
-const scopeLabels = { demo: "형식 예제", development: "개발", validation: "검증", test: "최종 평가", all: "전체", custom: "직접 지정" };
+const scopeLabels = { demo: "형식 예제", train: "학습", evaluation: "평가", development: "개발", validation: "검증", test: "최종 평가", all: "전체", custom: "직접 지정" };
 const statusLabels = { awaiting_review: "검수 대기", queued: "자동 검수 대기", judging: "자동 검수 중", complete: "완료", needs_review: "재검토 필요", error: "검수 오류", pending: "검수 대기" };
 const rubricLabels = { plausibility: "오답의 그럴듯함", learning_alignment: "학습 목표 관련성", distinctness: "오답 간 구별성", no_cues: "불필요한 정답 단서 억제" };
 const rubricDescriptions = { plausibility: "B1–B2 학습자가 혼동할 만한 오답인가요?", learning_alignment: "목표 어휘·결합·문법 지식으로 구별하나요?", distinctness: "세 오답이 구별되며 불필요하게 반복되지 않나요?", no_cues: "길이·표기·형식만으로 정답이 드러나지 않나요?" };
@@ -24,6 +24,11 @@ function tag(text, kind = "neutral") { return node("span", `tag ${kind}`, text);
 function statusTag(status) { return tag(statusLabels[status] || status, status === "complete" ? "success" : status === "error" ? "error" : "warning"); }
 function judgeActive(run) { return ["queued", "judging"].includes(run?.status); }
 function temporaryRun(run) { const report = run?.report || run; return run?.score_mode === "temporary" || report?.score_mode === "temporary" || Number(report?.counts?.quality_temporary || 0) > 0 || !!report?.papers?.some(paper => paper.items.some(item => item.quality?.source === "temporary")); }
+function scoringRule(version) {
+  if (version === "exact-rq-v3") return { version, label: "v3", formula: "100 × R × Qmatched", legacy: false };
+  if (["exact-prq-v1", "exact-prq-v2"].includes(version)) return { version, label: version.endsWith("v1") ? "v1" : "v2", formula: "100 × P × R × Qmatched", legacy: true };
+  return { version: version || "버전 정보 없음", label: "이전 계산식", formula: "100 × P × R × Qmatched", legacy: true };
+}
 function localJudge() { try { return ["localhost", "127.0.0.1", "::1", "[::1]"].includes(new URL(state.config?.judge?.base_url).hostname); } catch { return false; } }
 function empty(title, description) { const box = node("div", "empty-state"); box.append(node("strong", "", title), node("p", "", description)); return box; }
 function showMessage(selector, message, kind = "") { const element = $(selector); element.textContent = message; element.className = `notice ${kind}`; element.hidden = !message; }
@@ -118,11 +123,16 @@ async function initialize() {
     updateAccess();
     if (state.session.auth_required && !state.session.authenticated && !state.session.public_read) { openLogin(); $("#connection-status").textContent = "팀 로그인 필요"; return; }
     state.config = await api("/api/config");
+    if (state.config.metrics_version) $("#protocol-version").textContent = `평가 프로토콜 ${scoringRule(state.config.metrics_version).label}`;
     state.judgeStatus = { configured: !!state.config.judge?.configured, ready: false, message: "평가 모델의 연결 상태를 확인 중입니다." };
     const summary = state.config.dataset;
     $("#stat-papers").textContent = number(summary.paper_count);
     $("#stat-expressions").textContent = number(summary.expression_count);
     $("#stat-domains").textContent = number(summary.domain_count);
+    ["train", "evaluation"].forEach(scope => {
+      const value = summary.splits?.[scope];
+      $("#dataset-size-" + scope).textContent = value === undefined ? "—" : number(Array.isArray(value) ? value.length : value);
+    });
     $("#dataset-version").textContent = `DATA ${String(summary.version || "v2").slice(0, 12)}`;
     const maxBytes = state.config.limits?.max_upload_bytes;
     if (maxBytes) $("#upload-limit").textContent = `최대 ${Math.round(maxBytes / 1024 / 1024)} MB`;
@@ -154,11 +164,10 @@ async function refreshJudgeStatus() {
 }
 function updateScopeHint() {
   const scope = $("#scope").value;
-  $("#custom-scope-field").hidden = scope !== "custom";
   const rawCount = state.config?.dataset?.splits?.[scope];
   const count = Array.isArray(rawCount) ? rawCount.length : rawCount;
-  let message = scope === "custom" ? "평가할 논문 ID를 먼저 고정하세요. 제출 누락도 점수에 반영됩니다." : `${scopeLabels[scope]} 세트${count !== undefined ? ` ${number(count)}편` : ""}의 모든 논문을 평가합니다. 미제출 논문도 Recall의 분모에 포함됩니다.`;
-  if (scope === "test") message += " 최종 평가 전에는 생성 프롬프트와 기준을 고정하세요.";
+  let message = `${scopeLabels[scope]} 세트${count !== undefined ? ` ${number(count)}편` : ""}의 모든 논문을 평가합니다. 미제출 논문도 Recall의 분모에 포함됩니다.`;
+  if (scope === "evaluation") message += " 평가 전에는 모델과 생성 프롬프트를 고정하세요.";
   $("#scope-hint").textContent = message;
 }
 async function readFile(file) {
@@ -178,10 +187,10 @@ async function loadSample() {
   try {
     const sample = await api("/api/sample");
     $("#prediction-text").value = sample.predictions.map(prediction => JSON.stringify(prediction)).join("\n");
-    $("#run-name").value = "입력 형식 예제 · 직접 작성";
+    $("#run-name").value = "입력 형식 예제 · 참조 표현 전체";
     $("#scope").value = sample.scope || "demo"; updateScopeHint();
-    $("#paper-ids").value = (sample.paper_ids || []).join("\n");
-    $("#file-label").textContent = `직접 작성한 형식 예제 · ${sample.predictions.length}편`;
+    const questionCount = sample.predictions.reduce((sum, paper) => sum + paper.questions.length, 0);
+    $("#file-label").textContent = `참조 표현을 모두 담은 형식 예제 · ${sample.predictions.length}편 / ${questionCount}문항`;
     state.isSample = true; $("#demo-notice").hidden = false;
     showMessage("#upload-errors", ""); toast("예제를 불러왔습니다. 자동 평가 시작을 누르세요.");
   } catch (error) { showMessage("#upload-errors", error.message, "error"); }
@@ -192,10 +201,6 @@ async function submitEvaluation(event) {
   const predictions = $("#prediction-text").value.trim();
   if (!predictions) { showMessage("#upload-errors", "생성 결과 파일을 선택하거나 JSON/JSONL을 붙여넣어주세요.", "error"); $("#prediction-text").focus(); return; }
   const payload = { name: $("#run-name").value.trim(), scope: $("#scope").value, predictions };
-  if (payload.scope === "custom") {
-    payload.paper_ids = [...new Set($("#paper-ids").value.split(/[\s,]+/).map(value => value.trim()).filter(Boolean))];
-    if (!payload.paper_ids.length) { showMessage("#upload-errors", "직접 지정할 평가 대상 논문 ID를 입력해주세요.", "error"); return; }
-  }
   const button = $("#evaluate-button"); setBusy(button, true, "표현 채점 중"); showMessage("#upload-errors", "");
   try {
     const run = await api("/api/runs", { method: "POST", body: JSON.stringify(payload) });
@@ -222,6 +227,7 @@ function renderReport() {
   const run = state.run;
   if (!run) return;
   const report = run.report, metrics = report.metrics, counts = report.counts;
+  const rule = scoringRule(report.metrics_version);
   const unresolved = (counts.quality_pending || 0) + (counts.quality_error || 0) + (counts.needs_review || 0);
   const temporary = temporaryRun(run), active = judgeActive(run), temporaryCount = counts.quality_temporary || 0;
   const uncertainCount = report.papers.reduce((sum, paper) => sum + paper.items.filter(item => item.quality?.source === "llm" && item.quality.option_assessments?.some(assessment => assessment.verdict === "uncertain")).length, 0);
@@ -229,17 +235,18 @@ function renderReport() {
   const needsJudge = unresolved > 0 || temporary;
   $("#report-section").hidden = false;
   $("#report-title").textContent = run.name;
-  $("#report-meta").textContent = `${date(run.created_at)} · ${scopeLabels[report.scope.name] || report.scope.name} ${number(report.scope.paper_count)}편 · ${statusLabels[run.status] || run.status}${temporary ? " · 임시 점수" : ""}`;
+  $("#report-meta").textContent = `${date(run.created_at)} · ${scopeLabels[report.scope.name] || report.scope.name} ${number(report.scope.paper_count)}편 · ${statusLabels[run.status] || run.status} · ${rule.legacy ? "이전 기준 · " : ""}${rule.version}${temporary ? " · 임시 점수" : ""}`;
   $("#download-json").href = `/api/runs/${encodeURIComponent(run.id)}/export?format=json`;
   $("#download-csv").href = `/api/runs/${encodeURIComponent(run.id)}/export?format=csv`;
   $("#temporary-banner").hidden = !temporary;
-  if (temporary) $("#temporary-count").textContent = `${number(temporaryCount)}개 문항의 품질을 검수 없이 100%로 임시 처리했습니다. 구조 오류는 0점이며 최종 점수는 100 × P × R × Q로 계산합니다. 검증된 성능이 아니므로 일반 평가와 비교할 수 없습니다.`;
+  $("#skip-judge-help").textContent = `구조가 유효한 모든 문항의 Q를 100%로 처리합니다(기존 검수 포함). 이 기록의 최종 점수는 ${rule.formula}이며 검증된 성능이 아닙니다.`;
+  if (temporary) $("#temporary-count").textContent = `${number(temporaryCount)}개 문항의 품질을 검수 없이 100%로 임시 처리했습니다. 구조 오류는 0점이며 최종 점수는 ${rule.formula}로 계산합니다(${rule.version}). 검증된 성능이 아니므로 일반 평가와 비교할 수 없습니다.`;
   const cards = $("#metric-cards"); cards.replaceChildren(
-    metricCard("Precision · 선정 정확도", metrics.precision_pct, `${number(counts.matched)}개 일치 / ${number(counts.predicted)}개 생성`),
-    metricCard("Recall · 참조 표현 재현율", metrics.recall_pct, `${number(counts.matched)}개 일치 / ${number(counts.gold)}개 참조`),
-    metricCard("F1 · 표현 선정", metrics.f1_pct, "Precision과 Recall의 조화평균"),
+    metricCard("Recall · 표현 재현율", metrics.recall_pct, `${number(counts.matched)}개 일치 / ${number(counts.gold)}개 실제 참조`),
+    metricCard(rule.legacy ? "Precision · 선정 정확도" : "Precision · 보조 지표", metrics.precision_pct, `${number(counts.matched)}개 일치 / ${number(counts.predicted)}개 생성`),
+    metricCard("F1 · 보조 지표", metrics.f1_pct, "Precision과 Recall의 조화평균"),
     metricCard(temporary ? "Q · 일치 문항 품질 (임시)" : "Q · 일치 문항 품질", metrics.quality_matched_pct, temporary ? "검수 없이 만점 처리한 문항 포함" : "참조 라벨과 일치한 문항의 평균", false, unresolved > 0 && counts.matched > 0),
-    metricCard(temporary ? "최종 점수 · 임시" : "최종 점수", metrics.final_score, temporary ? "검증 전 임시값 · 100 × P × R × Q" : "100 × P × R × Q", true, unresolved > 0, "/ 100")
+    metricCard(temporary ? "최종 점수 · 임시" : rule.legacy ? "최종 점수 · 이전 기준" : "최종 점수", metrics.final_score, `${temporary ? "검증 전 임시값 · " : ""}${rule.formula}`, true, unresolved > 0, "/ 100")
   );
   $("#report-secondary").replaceChildren(
     secondaryMetric("전체 문항 품질", percent(metrics.quality_all_pct)),
@@ -252,7 +259,8 @@ function renderReport() {
   if (temporaryCount) $("#report-secondary").append(secondaryMetric("임시 만점 처리", `${number(temporaryCount)}개`));
   if (counts.review_recommended) $("#report-secondary").append(secondaryMetric("사람 검수 권장", `${number(counts.review_recommended)}개`));
   const notices = [];
-  if (run.is_demo) notices.push("형식 예제 · 사람이 직접 작성한 입력 형식 예제입니다. 실제 생성 모델의 기준 성능이 아닙니다.");
+  if (rule.legacy) notices.push(`이 기록은 이전 기준 ${rule.version}(${rule.formula})로 계산한 점수를 유지합니다. 새 평가의 v3 기준과 직접 비교할 수 없습니다.`);
+  if (run.is_demo) notices.push("형식 예제 · 참조 라벨을 참고해 직접 작성한 예제입니다. 보기 품질은 별도로 평가하며 실제 생성 모델의 기준 성능이 아닙니다.");
   if (report.papers.some(paper => paper.items.some(item => item.quality?.source === "llm"))) notices.push("LLM 판정에는 오류가 있을 수 있습니다. 기준 성능 비교 전 문항별 근거와 사람의 표본 검수를 확인하세요.");
   $("#judge-progress").hidden = !active;
   if (active) {
@@ -441,7 +449,7 @@ async function loadHistory() {
     container.replaceChildren();
     if (!state.runs.length) { container.append(empty("아직 평가 기록이 없습니다", "모델 평가에서 예제를 불러와 첫 평가를 시작해보세요.")); $("#compare-button").disabled = true; return; }
     const table = node("table"), head = node("thead"), row = node("tr");
-    ["선택", "평가 이름", "대상", "상태", "F1", "보기 품질", "최종 점수"].forEach(label => row.append(node("th", "", label))); head.append(row); table.append(head);
+    ["선택", "평가 이름", "대상", "상태", "Recall", "보기 품질", "최종 점수"].forEach(label => row.append(node("th", "", label))); head.append(row); table.append(head);
     const body = node("tbody");
     state.runs.forEach(run => {
       const temporary = temporaryRun(run);
@@ -451,11 +459,13 @@ async function loadHistory() {
       const nameCell = node("td"), button = node("button", "run-name-button", run.name); button.addEventListener("click", () => loadRun(run.id)); nameCell.append(button);
       if (run.is_demo) nameCell.append(document.createTextNode(" "), tag("형식 예제"));
       if (temporary) nameCell.append(document.createTextNode(" "), tag("임시 · 검수 스킵", "temporary"));
-      nameCell.append(node("div", "run-date", date(run.created_at))); tr.append(nameCell);
+      const rule = scoringRule(run.metrics_version);
+      if (rule.legacy) nameCell.append(document.createTextNode(" "), tag(`이전 기준 ${rule.label}`));
+      nameCell.append(node("div", "run-date", `${date(run.created_at)} · ${rule.version}`)); tr.append(nameCell);
       const scope = typeof run.scope === "object" ? run.scope?.name : run.scope;
       tr.append(node("td", "", scopeLabels[scope] || scope || "—"));
       const status = node("td"); status.append(temporary && !judgeActive(run) ? tag("임시 점수", "temporary") : statusTag(run.status)); tr.append(status);
-      tr.append(node("td", "table-number", percent(run.metrics?.f1_pct)), node("td", "table-number", percent(run.metrics?.quality_matched_pct)), node("td", "table-number", percent(run.metrics?.final_score, ""))); body.append(tr);
+      tr.append(node("td", "table-number", percent(run.metrics?.recall_pct)), node("td", "table-number", percent(run.metrics?.quality_matched_pct)), node("td", "table-number", percent(run.metrics?.final_score, ""))); body.append(tr);
     }); table.append(body); container.append(table); $("#compare-button").disabled = state.selectedRuns.size !== 2;
   } catch (error) { container.replaceChildren(empty("평가 기록을 불러오지 못했습니다", error.message)); }
 }
@@ -479,7 +489,7 @@ async function compareRuns() {
     if (results.some(run => run.report.metrics.final_score == null)) warnings.push("검수가 미완료되었거나 최종 점수를 정의할 수 없는 평가가 포함되어 있습니다.");
     showMessage("#comparison-warning", warnings.join("\n"), "warning");
     const table = node("table"), head = node("thead"), header = node("tr"); header.append(node("th", "", "비교 항목")); results.forEach(run => header.append(node("th", "", run.name))); head.append(header); table.append(head);
-    const rows = [["평가 대상", report => `${scopeLabels[report.scope.name] || report.scope.name} · ${report.scope.paper_count}편`], ["데이터 버전", report => String(report.dataset_version).slice(0, 12)], ["Precision", report => percent(report.metrics.precision_pct)], ["Recall", report => percent(report.metrics.recall_pct)], ["F1", report => percent(report.metrics.f1_pct)], ["일치 문항 품질", report => percent(report.metrics.quality_matched_pct)], ["전체 문항 품질", report => percent(report.metrics.quality_all_pct)], ["단일 정답률", report => percent(report.metrics.unique_answer_rate_pct)], ["논문 제출률", report => percent(report.metrics.coverage_pct)], ["최종 점수", report => percent(report.metrics.final_score, " / 100")]];
+    const rows = [["평가 대상", report => `${scopeLabels[report.scope.name] || report.scope.name} · ${report.scope.paper_count}편`], ["데이터 버전", report => String(report.dataset_version).slice(0, 12)], ["채점 기준 버전", report => scoringRule(report.metrics_version).version], ["최종 점수 계산식", report => scoringRule(report.metrics_version).formula], ["Recall", report => percent(report.metrics.recall_pct)], ["일치 문항 품질", report => percent(report.metrics.quality_matched_pct)], ["Precision", report => percent(report.metrics.precision_pct)], ["F1 · 보조 지표", report => percent(report.metrics.f1_pct)], ["전체 문항 품질", report => percent(report.metrics.quality_all_pct)], ["단일 정답률", report => percent(report.metrics.unique_answer_rate_pct)], ["논문 제출률", report => percent(report.metrics.coverage_pct)], ["최종 점수", report => percent(report.metrics.final_score, " / 100")]];
     const body = node("tbody"); rows.forEach(([label, getter]) => { const row = node("tr"); row.append(node("td", "", label)); results.forEach(run => row.append(node("td", "table-number", getter(run.report)))); body.append(row); }); table.append(body);
     $("#comparison-table").replaceChildren(table); $("#comparison").hidden = false; $("#comparison").scrollIntoView({ behavior: "smooth", block: "start" });
   } catch (error) { toast(error.message); }
@@ -528,31 +538,33 @@ async function submitReview(event) {
 
 async function loadDataset() {
   const sequence = ++state.datasetSequence;
-  const params = new URLSearchParams({ q: $("#dataset-search").value.trim(), offset: state.datasetPage * PAGE_SIZE, limit: PAGE_SIZE });
+  const scope = $("#dataset-scope").value;
+  const params = new URLSearchParams({ scope, q: $("#dataset-search").value.trim(), offset: state.datasetPage * PAGE_SIZE, limit: PAGE_SIZE });
   const container = $("#dataset-list");
   try {
     const result = await api(`/api/papers?${params}`);
     if (sequence !== state.datasetSequence) return;
     state.datasetTotal = result.total; container.replaceChildren();
-    $("#dataset-count").textContent = `${number(result.total)}편`;
+    $("#dataset-count").textContent = `${scopeLabels[scope]} ${number(result.total)}편`;
     if (!result.items.length) container.append(empty("검색 결과가 없습니다", "다른 논문명, 분야 또는 ID로 검색해보세요."));
     result.items.forEach(paper => {
       const details = node("details", "dataset-paper"), summary = node("summary"), copy = node("div", "paper-summary-copy");
       copy.append(node("div", "paper-summary-title", paper.paper_name || paper.paper_id));
       copy.append(node("div", "paper-summary-meta", `${paper.paper_id} · ${displayDomain(paper.domain)}`));
-      summary.append(copy, tag(`표현 ${paper.gold_count ?? 0}개`, "success")); details.append(summary);
+      summary.append(copy, Number.isInteger(paper.gold_count) ? tag(`표현 ${paper.gold_count}개`, "success") : tag(`${scopeLabels[scope]} 자료`, "neutral")); details.append(summary);
       const body = node("div", "dataset-paper-body"); details.append(body);
       let loaded = false, loading = false;
       details.addEventListener("toggle", async () => {
         if (!details.open || loaded || loading) return;
-        loading = true; body.replaceChildren(node("p", "muted", "원문과 표현을 불러오는 중…"));
+        loading = true; body.replaceChildren(node("p", "muted", "논문 데이터를 불러오는 중…"));
         try {
-          const full = await api(`/api/papers/${encodeURIComponent(paper.paper_id)}`);
+          const full = await api(`/api/papers/${encodeURIComponent(paper.paper_id)}?scope=${encodeURIComponent(scope)}`);
           body.replaceChildren(node("div", "label-caption", "ABSTRACT"), node("div", "abstract-text", full.abstract));
-          body.append(node("div", "label-caption", "REFERENCE EXPRESSIONS"));
-          const expressions = full.expressions || [];
-          if (!expressions.length) body.append(node("p", "muted", "선정된 참조 표현이 없습니다."));
-          expressions.forEach(expression => {
+          const expressions = Array.isArray(full.expressions) ? full.expressions : null;
+          if (expressions) body.append(node("div", "label-caption", "REFERENCE EXPRESSIONS"));
+          if (expressions && !expressions.length) body.append(node("p", "muted", "선정된 참조 표현이 없습니다."));
+          if (!expressions) body.append(node("p", "muted", "이 데이터는 논문 초록을 제공합니다."));
+          (expressions || []).forEach(expression => {
             const entry = node("div", "label-entry");
             if (typeof expression === "string") entry.append(node("strong", "", expression));
             else { entry.append(node("strong", "", expression.text), tag(expression.expression_type || "expression"), node("p", "", expression.reason || "")); if (expression.canonical_form) entry.append(node("p", "", `대표 형태 · ${expression.canonical_form}`)); }
@@ -595,6 +607,7 @@ function bindEvents() {
   $("#review-form").addEventListener("submit", submitReview);
   $("#review-form").addEventListener("change", event => { if (event.target.name === "accepted_option" || event.target.name in rubricLabels || ["context_sufficient", "no_specialist_knowledge", "no_answer_leak"].includes(event.target.name)) updateReviewPreview(); });
   let searchTimer;
+  $("#dataset-scope").addEventListener("change", () => { clearTimeout(searchTimer); state.datasetPage = 0; loadDataset(); });
   $("#dataset-search").addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => { state.datasetPage = 0; loadDataset(); }, 280); });
   $("#dataset-prev").addEventListener("click", () => { state.datasetPage--; loadDataset(); });
   $("#dataset-next").addEventListener("click", () => { state.datasetPage++; loadDataset(); });

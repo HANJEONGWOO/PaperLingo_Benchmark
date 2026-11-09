@@ -14,7 +14,7 @@ from .dataset import Dataset, domain_code, occurrences, word_boundary
 from .submission import COMPACT_FIELDS, INFERENCE_POLICY, generated_question_id, normalize_question, question_format
 
 
-METRICS_VERSION = "exact-prq-v2"
+METRICS_VERSION = "exact-rq-v3"
 QUALITY_POLICY_VERSION = "auto-conservative-v1"
 QUESTION_FIELDS = {
     "question_id", "expression_text", "expression_type", "expression_span",
@@ -269,7 +269,11 @@ def _percentage(value: float | None) -> float | None:
 
 
 def recompute(report: dict) -> dict:
-    """Recompute aggregates after a human/judge update, keeping matches fixed."""
+    """Recompute using the report's saved metric version, keeping matches fixed.
+
+    V3 uses Recall × matched quality. Earlier or unversioned reports retain
+    Precision × Recall × matched quality; recomputation never migrates them.
+    """
     papers = report["papers"]
     items = [item for paper in papers for item in paper["items"]]
     for item in items:
@@ -296,7 +300,9 @@ def recompute(report: dict) -> dict:
     quality_matched = sum(item["quality"]["q"] for item in matched_items) / matched if matched_done and matched else None
     final = None
     if all_done and gold:
-        final = precision * recall * quality_matched if matched else 0.0
+        final = recall * quality_matched if matched else 0.0
+        if report.get("metrics_version") != "exact-rq-v3":
+            final *= precision
 
     def unique_answer(item: dict) -> bool:
         quality = item["quality"]

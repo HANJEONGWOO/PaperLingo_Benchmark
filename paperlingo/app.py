@@ -28,7 +28,7 @@ from .judge import JudgeConfig, judge_item, quality_from_review, temporary_quali
 from .scoring import METRICS_VERSION, SubmissionError, evaluate, recompute
 from .storage import Store, now, report_status
 
-VERSION = "0.3.0"
+VERSION = "0.5.0"
 COOKIE = "paperlingo_session"
 
 
@@ -75,7 +75,7 @@ class LoginInput(BaseModel):
 class RunInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=1, max_length=120)
-    scope: Literal["demo", "development", "validation", "test", "all", "custom"]
+    scope: Literal["demo", "train", "evaluation"]
     paper_ids: list[str] | None = None
     predictions: str | list[dict[str, Any]]
 
@@ -260,7 +260,7 @@ def create_app(settings: Settings | None = None):
     @app.get("/api/config")
     def config(request: Request):
         need_read(request)
-        return {"dataset": dataset.summary(), "judge": {"configured": cfg.judge_configured, "automatic": cfg.judge_configured, "model": cfg.judge_model, "base_url": cfg.judge_base_url, "concurrency": cfg.judge_concurrency}, "auth_required": bool(cfg.password) and not cfg.public_access, "public_read": cfg.public_read or cfg.public_access, "public_access": cfg.public_access, "can_manage": is_admin(request), "limits": {"max_upload_bytes": cfg.max_request_bytes, "judge_batch_size": cfg.judge_batch_size, "max_runs": cfg.max_runs}, "version": VERSION}
+        return {"dataset": dataset.summary(), "judge": {"configured": cfg.judge_configured, "automatic": cfg.judge_configured, "model": cfg.judge_model, "base_url": cfg.judge_base_url, "concurrency": cfg.judge_concurrency}, "auth_required": bool(cfg.password) and not cfg.public_access, "public_read": cfg.public_read or cfg.public_access, "public_access": cfg.public_access, "can_manage": is_admin(request), "limits": {"max_upload_bytes": cfg.max_request_bytes, "judge_batch_size": cfg.judge_batch_size, "max_runs": cfg.max_runs}, "metrics_version": METRICS_VERSION, "version": VERSION}
 
     @app.get("/api/judge/status")
     async def judge_status(request: Request):
@@ -287,17 +287,22 @@ def create_app(settings: Settings | None = None):
     @app.get("/api/splits")
     def splits(request: Request, download: bool = False):
         need_read(request)
-        manifest = {"dataset_version": dataset.version, "seed": dataset.SPLIT_SEED, "splits": dataset.splits}
+        from .training_answers import training_answer_metadata
+        manifest = {"dataset_version": dataset.version, "split_version": dataset.SPLIT_VERSION,
+                    "seed": dataset.SPLIT_SEED, "splits": dataset.splits,
+                    "training_answers": training_answer_metadata()}
         if download:
             return Response(json.dumps(manifest, ensure_ascii=False, indent=2), media_type="application/json", headers={"Content-Disposition": 'attachment; filename="paperlingo-splits.json"'})
         return manifest
 
     @app.get("/api/papers")
-    def papers(request: Request, q: str = "", offset: int = 0, limit: int = 20, domain: str = ""):
+    def papers(request: Request, q: str = "", offset: int = 0, limit: int = 20, domain: str = "",
+               scope: Literal["train", "evaluation"] = "train"):
         need_read(request)
         q = q[:200].casefold()
         rows = []
-        for pid, paper in dataset.papers.items():
+        for pid in dataset.splits[scope]:
+            paper = dataset.papers[pid]
             dom = paper.get("domain", {})
             code = dom.get("code", "") if isinstance(dom, dict) else str(dom)
             if domain and domain != code:
@@ -306,7 +311,7 @@ def create_app(settings: Settings | None = None):
                 continue
             rows.append({"paper_id": pid, "paper_name": paper["paper_name"], "domain": code, "gold_count": len(dataset.labels[pid])})
         offset, limit = max(offset, 0), max(1, min(limit, 100))
-        return {"items": rows[offset:offset + limit], "total": len(rows)}
+        return {"items": rows[offset:offset + limit], "total": len(rows), "scope": scope}
 
     @app.get("/api/papers/{paper_id:path}")
     def paper_detail(paper_id: str, request: Request):
@@ -315,6 +320,34 @@ def create_app(settings: Settings | None = None):
             raise HTTPException(404, "논문을 찾을 수 없습니다.")
         return {**dataset.papers[paper_id], "expressions": dataset.labels[paper_id]}
 
+    @app.get("/api/datasets/{scope}/{kind}")
+    def download_dataset(request: Request, scope: Literal["train", "evaluation"],
+                         kind: Literal["papers", "labels", "answers"]):
+        need_read(request)
+        if kind == "answers" and scope != "train":
+            raise HTTPException(404, "사지선다 예시답안은 학습 세트에만 제공합니다.")
+        paper_ids = dataset.splits[scope]
+        if kind == "papers":
+            fields = ("paper_id", "paper_name", "domain", "categories", "abstract")
+            records = [{key: dataset.papers[pid][key] for key in fields if key in dataset.papers[pid]}
+                       for pid in paper_ids]
+        elif kind == "labels":
+            records = [{"paper_id": pid, "expressions": dataset.labels[pid]} for pid in paper_ids]
+        else:
+            from .training_answers import generate_training_answers
+            records = generate_training_answers(dataset)
+        content = "\n".join(json.dumps(record, ensure_ascii=False) for record in records) + "\n"
+        headers = {
+            "Content-Disposition": f'attachment; filename="paperlingo-{scope}-{kind}.jsonl"',
+            "X-Dataset-Version": dataset.version,
+            "X-Split-Version": dataset.SPLIT_VERSION,
+        }
+        if kind == "answers":
+            from .training_answers import training_answer_metadata
+            metadata = training_answer_metadata()
+            headers.update({"X-Answer-Version": metadata["version"], "X-Answer-Quality": metadata["quality_status"]})
+        return Response(content, media_type="application/x-ndjson", headers=headers)
+
     @app.get("/api/sample")
     def sample(request: Request, download: bool = False):
         need_read(request)
@@ -322,7 +355,7 @@ def create_app(settings: Settings | None = None):
         if download:
             content = "\n".join(json.dumps(p, ensure_ascii=False) for p in predictions) + "\n"
             return Response(content, media_type="application/x-ndjson", headers={"Content-Disposition": 'attachment; filename="paperlingo-format-example.jsonl"'})
-        return {"scope": "demo", "paper_ids": dataset.splits["demo"], "predictions": predictions, "note": "직접 작성한 형식 예제입니다. 모델의 실측 성능이 아닙니다."}
+        return {"scope": "demo", "paper_ids": dataset.splits["demo"], "predictions": predictions, "note": "참조 표현을 모두 담아 직접 작성한 형식 예제입니다. 형식 예제 세트에서 Precision·Recall·F1은 100%이며 보기 품질은 별도 평가합니다. 모델의 실측 성능이 아닙니다."}
 
     @app.get("/api/schema")
     def schema(request: Request):
@@ -332,6 +365,7 @@ def create_app(settings: Settings | None = None):
             "submission_format": "compact-v1",
             "input": "논문별 객체의 JSON 배열 또는 JSONL",
             "max_questions_per_paper": 5,
+            "scopes": ["demo", "train", "evaluation"],
             "required_paper_fields": ["paper_id", "questions"],
             "required_question_fields": ["expression_text", "options", "answer_id"],
             "question_fields": {
@@ -365,18 +399,16 @@ def create_app(settings: Settings | None = None):
         predictions = parse_predictions(body.predictions)
         if not body.name.strip():
             raise HTTPException(422, "평가 이름을 입력하세요.")
-        if body.scope == "custom":
-            paper_ids = body.paper_ids
-            if not paper_ids or len(paper_ids) != len(set(paper_ids)):
-                raise HTTPException(422, "사용자 지정 범위에는 중복 없는 논문 ID 목록이 필요합니다.")
-        else:
-            paper_ids = dataset.splits[body.scope]
-            if body.paper_ids is not None and set(body.paper_ids) != set(paper_ids):
-                raise HTTPException(422, "고정 평가 범위와 paper_ids가 다릅니다.")
+        paper_ids = dataset.splits[body.scope]
+        if body.paper_ids is not None and (
+            len(body.paper_ids) != len(paper_ids) or set(body.paper_ids) != set(paper_ids)
+        ):
+            raise HTTPException(422, "고정 평가 범위와 paper_ids가 다릅니다.")
         try:
             report = evaluate(dataset, predictions, paper_ids, body.scope)
         except SubmissionError as exc:
             raise HTTPException(422, {"message": "제출 형식을 확인하세요.", "errors": exc.errors}) from None
+        report["split_version"] = dataset.SPLIT_VERSION
         async with write_lock:
             if store.count() >= cfg.max_runs:
                 raise HTTPException(409, "평가 기록 저장 한도에 도달했습니다. 관리자가 백업 후 저장소를 정리해야 합니다.")
@@ -404,7 +436,8 @@ def create_app(settings: Settings | None = None):
             return False
         job_id = secrets.token_hex(12)
         run["status"] = "queued"
-        run["report"]["metrics_version"] = METRICS_VERSION
+        # Review actions change quality only. Keep the run's original formula;
+        # switching a legacy run to the new formula would rewrite its meaning.
         run["report"]["quality_policy_version"] = QUALITY_POLICY_VERSION
         run["judge_meta"] = {"model": cfg.judge_model, "job_id": job_id, "automatic": automatic,
                              "queued_at": now(), "total": len(selected), "processed": 0,
@@ -525,7 +558,6 @@ def create_app(settings: Settings | None = None):
                 reviews.append({"paper_id": paper["paper_id"], "question_id": item["question_id"],
                                 "previous_quality": previous, "quality": item["quality"]})
             run["judge_meta"].update(job_id=None, skipped_at=now(), temporary_full_credit=True)
-            run["report"]["metrics_version"] = METRICS_VERSION
             run["report"]["quality_policy_version"] = QUALITY_POLICY_VERSION
             recompute(run["report"])
             run["status"] = report_status(run["report"])
@@ -572,10 +604,10 @@ def create_app(settings: Settings | None = None):
         writer.writerow(["paper_id", "question_id", "expression", "matched", "structure_valid", "quality_status", "quality_source", "quality_score_pct", "accepted_options", "answer_id", "issues", "rationale", "score_mode", "quality_policy", "metrics_version"])
         for paper in run["report"]["papers"]:
             if not paper["items"]:
-                writer.writerow([csv_value(paper["paper_id"]), "", "", "", "", "empty_submission" if paper["submitted"] else "missing_submission"] + [""] * 6 + [run["report"].get("score_mode", "reviewed"), "", run["report"]["metrics_version"]])
+                writer.writerow([csv_value(paper["paper_id"]), "", "", "", "", "empty_submission" if paper["submitted"] else "missing_submission"] + [""] * 6 + [run["report"].get("score_mode", "reviewed"), "", run["report"].get("metrics_version")])
             for item in paper["items"]:
                 q = item["quality"]
-                writer.writerow([csv_value(x) for x in [paper["paper_id"], item["question_id"], item["expression_text"], item["matched"], item["structure_valid"], q["status"], q["source"], None if q["q"] is None else round(q["q"] * 100, 2), ",".join(q.get("accepted_option_ids", [])), item.get("answer_id", ""), "; ".join(i["message"] for i in item["issues"]), q.get("rationale", ""), run["report"].get("score_mode", "reviewed"), q.get("scoring_policy", ""), run["report"]["metrics_version"]]])
+                writer.writerow([csv_value(x) for x in [paper["paper_id"], item["question_id"], item["expression_text"], item["matched"], item["structure_valid"], q["status"], q["source"], None if q["q"] is None else round(q["q"] * 100, 2), ",".join(q.get("accepted_option_ids", [])), item.get("answer_id", ""), "; ".join(i["message"] for i in item["issues"]), q.get("rationale", ""), run["report"].get("score_mode", "reviewed"), q.get("scoring_policy", ""), run["report"].get("metrics_version")]])
         return Response("\ufeff" + buffer.getvalue(), media_type="text/csv; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="paperlingo-{run_id}.csv"'})
 
     static = Path(__file__).parent / "static"

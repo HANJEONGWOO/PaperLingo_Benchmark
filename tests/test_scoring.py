@@ -70,7 +70,7 @@ def test_formula_missing_paper_denominator_and_unicode_spans(dataset):
     recompute(report)
     assert report["metrics"]["quality_all_pct"] == 62.5
     assert report["metrics"]["quality_matched_pct"] == 75
-    assert report["metrics"]["final_score"] == 12.5
+    assert report["metrics"]["final_score"] == 25
 
 
 def test_unmatched_pending_prevents_final_even_matched_quality_complete(dataset):
@@ -100,7 +100,7 @@ def test_duplicate_expression_is_false_positive_with_forced_zero_quality(dataset
     assert report["metrics"]["precision_pct"] == 50
     assert report["metrics"]["recall_pct"] == 50
     assert report["metrics"]["quality_all_pct"] == 50
-    assert report["metrics"]["final_score"] == 25
+    assert report["metrics"]["final_score"] == 50
     assert second["quality"]["source"] == "structural"
 
 
@@ -242,7 +242,7 @@ def mark_temporary(item):
 
 def test_new_reports_identify_automatic_quality_policy(dataset):
     report = evaluate(dataset, [], ["p1"], "custom")
-    assert report["metrics_version"] == "exact-prq-v2"
+    assert report["metrics_version"] == "exact-rq-v3"
     assert report["quality_policy_version"] == "auto-conservative-v1"
     assert report["score_mode"] == "reviewed"
     assert report["counts"]["quality_temporary"] == 0
@@ -272,7 +272,7 @@ def test_temporary_quality_boosts_only_valid_items_and_keeps_expression_scores(d
     assert items[1]["quality"]["q"] == 0
     assert report["metrics"]["quality_all_pct"] == pytest.approx(200 / 3)
     assert report["metrics"]["quality_matched_pct"] == 50
-    assert report["metrics"]["final_score"] == pytest.approx(100 / 3)
+    assert report["metrics"]["final_score"] == 50
     assert report["metrics"]["unique_answer_rate_pct"] == 0
 
     # Replacing the two provisional scores removes the temporary report flag.
@@ -336,12 +336,114 @@ def test_structural_failure_cannot_be_changed_to_temporary_or_recommended(datase
     assert report["metrics"]["final_score"] == 0
 
 
-def test_recomputing_legacy_report_does_not_relabel_its_policy(dataset):
-    report = evaluate(dataset, [{"paper_id": "p1", "questions": [question(dataset)]}], ["p1"], "custom")
-    report["metrics_version"] = "exact-prq-v1"
+@pytest.mark.parametrize("version", ["exact-prq-v1", "exact-prq-v2", None])
+def test_recomputing_legacy_report_keeps_precision_factor_and_original_version(dataset, version):
+    questions = [question(dataset), question(dataset, text="Results", question_id="q2")]
+    report = evaluate(dataset, [{"paper_id": "p1", "questions": questions}], ["p1"], "custom")
+    if version is None:
+        report.pop("metrics_version")
+    else:
+        report["metrics_version"] = version
     report.pop("quality_policy_version")
-    resolve(report["papers"][0]["items"][0])
+    for item in report["papers"][0]["items"]:
+        resolve(item, q=0.8)
     recompute(report)
-    assert report["metrics_version"] == "exact-prq-v1"
+    assert report.get("metrics_version") == version
+    assert ("metrics_version" in report) is (version is not None)
     assert "quality_policy_version" not in report
-    assert report["metrics"]["final_score"] == 50
+    assert report["metrics"]["precision_pct"] == 50
+    assert report["metrics"]["recall_pct"] == 50
+    assert report["metrics"]["final_score"] == 20  # 100 × 0.5 × 0.5 × 0.8
+
+
+@pytest.fixture
+def five_gold_dataset(tmp_path):
+    abstract = (
+        "We are consistent with results and depend on controls. "
+        "We provide insight into the problem and draw conclusions from data. "
+        "Results are in line with expectations."
+    )
+    papers = [{"paper_id": "p1", "paper_name": "Five references", "domain": {"code": "x"}, "abstract": abstract}]
+    labels = [{"paper_id": "p1", "expressions": [{"text": text} for text in (
+        "consistent with", "depend on", "provide insight into", "draw conclusions from", "in line with",
+    )]}]
+    for filename, rows in (("abstract_data.jsonl", papers), ("abstract_labels_v2.jsonl", labels)):
+        (tmp_path / filename).write_text("\n".join(json.dumps(row) for row in rows))
+    return Dataset(tmp_path)
+
+
+def matched_three(dataset):
+    return [question(dataset, text=text, question_id=f"matched-{index}") for index, text in enumerate((
+        "consistent with", "depend on", "provide insight into",
+    ))]
+
+
+def resolve_valid_items(report, matched_quality=0.8, unmatched_quality=1.0):
+    for paper in report["papers"]:
+        for item in paper["items"]:
+            if item["structure_valid"]:
+                resolve(item, q=matched_quality if item["matched"] else unmatched_quality)
+    return recompute(report)
+
+
+def test_recall_quality_example_is_48_in_v3_and_28_8_in_legacy(five_gold_dataset):
+    dataset = five_gold_dataset
+    questions = [*matched_three(dataset), question(dataset, text="Results", question_id="extra1"), question(dataset, text="problem", question_id="extra2")]
+    report = evaluate(dataset, [{"paper_id": "p1", "questions": questions}], ["p1"], "custom")
+    resolve_valid_items(report)
+    assert report["counts"]["gold"] == 5
+    assert report["counts"]["predicted"] == 5
+    assert report["counts"]["matched"] == 3
+    assert report["metrics"]["precision_pct"] == 60
+    assert report["metrics"]["recall_pct"] == 60
+    assert report["metrics"]["quality_matched_pct"] == 80
+    assert report["metrics"]["final_score"] == 48
+    for version in ("exact-prq-v1", "exact-prq-v2"):
+        legacy = deepcopy(report)
+        legacy["metrics_version"] = version
+        recompute(legacy)
+        assert legacy["metrics_version"] == version
+        assert legacy["metrics"]["final_score"] == 28.8
+
+
+@pytest.mark.parametrize("extras", ["nonmatching", "duplicate", "both"])
+def test_resolved_extra_or_duplicate_does_not_change_v3_final(five_gold_dataset, extras):
+    dataset = five_gold_dataset
+    base_questions = matched_three(dataset)
+    baseline = evaluate(dataset, [{"paper_id": "p1", "questions": base_questions}], ["p1"], "custom")
+    resolve_valid_items(baseline)
+    extended = deepcopy(base_questions)
+    if extras in {"nonmatching", "both"}:
+        extended.append(question(dataset, text="Results", question_id="nonmatching"))
+    if extras in {"duplicate", "both"}:
+        extended.append(question(dataset, question_id="duplicate"))
+    report = evaluate(dataset, [{"paper_id": "p1", "questions": extended}], ["p1"], "custom")
+    resolve_valid_items(report)
+    assert report["counts"]["predicted"] <= 5
+    assert report["counts"]["matched"] == baseline["counts"]["matched"] == 3
+    assert report["metrics"]["final_score"] == baseline["metrics"]["final_score"] == 48
+    assert report["metrics"]["recall_pct"] == baseline["metrics"]["recall_pct"] == 60
+    assert report["metrics"]["quality_matched_pct"] == 80
+    assert report["metrics"]["precision_pct"] < baseline["metrics"]["precision_pct"]
+    assert report["metrics"]["f1_pct"] < baseline["metrics"]["f1_pct"]
+    if extras in {"duplicate", "both"}:
+        duplicate = next(item for item in report["papers"][0]["items"] if item["question_id"] == "duplicate")
+        assert duplicate["quality"]["q"] == 0
+        assert duplicate["matched"] is False
+
+
+def test_v3_weights_each_matched_quality_once_and_excludes_unmatched_quality(five_gold_dataset):
+    dataset = five_gold_dataset
+    questions = [*matched_three(dataset), question(dataset, text="Results", question_id="extra")]
+    report = evaluate(dataset, [{"paper_id": "p1", "questions": questions}], ["p1"], "custom")
+    items = report["papers"][0]["items"]
+    for item, q in zip(items, (1.0, 0.5, 0.0, 1.0)):
+        resolve(item, q=q)
+    recompute(report)
+    assert report["metrics"]["quality_matched_pct"] == 50
+    assert report["metrics"]["quality_all_pct"] == 62.5
+    assert report["metrics"]["final_score"] == 30  # 100 × (1 + 0.5 + 0) / 5
+    resolve(items[-1], q=0)
+    recompute(report)
+    assert report["metrics"]["quality_all_pct"] == 37.5
+    assert report["metrics"]["final_score"] == 30

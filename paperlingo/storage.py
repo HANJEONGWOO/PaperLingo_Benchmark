@@ -82,7 +82,7 @@ class Store:
         for row in rows:
             r = self._decode(row)
             report = r.pop("report")
-            r.update(scope=report["scope"], metrics=report["metrics"], counts=report["counts"], dataset_version=report["dataset_version"], metrics_version=report["metrics_version"], score_mode=report.get("score_mode", "reviewed"), quality_policy_version=report.get("quality_policy_version"))
+            r.update(scope=report["scope"], metrics=report["metrics"], counts=report["counts"], dataset_version=report["dataset_version"], metrics_version=report.get("metrics_version"), score_mode=report.get("score_mode", "reviewed"), quality_policy_version=report.get("quality_policy_version"))
             result.append(r)
         return result
 

@@ -25,6 +25,33 @@ def create_demo(client):
     return result.json()
 
 
+def create_error_fixture(client):
+    """Keep adversarial coverage separate from the complete public demo."""
+    sample = copy.deepcopy(client.get("/api/sample").json()["predictions"])
+    selected = {
+        "0911.3369": ["identical to", "a function of"],
+        "1109.3182": ["consistent with"],
+    }
+    for paper in sample:
+        by_expression = {question["expression_text"]: question for question in paper["questions"]}
+        paper["questions"] = [by_expression[text] for text in selected.get(paper["paper_id"], [])]
+        if paper["paper_id"] == "0911.3369":
+            bad = paper["questions"][1]
+            bad["options"][(bad["answer_id"] + 1) % 4] = bad["options"][bad["answer_id"]]
+    result = client.post("/api/runs", headers=HEADERS, json={
+        "name": "명시적 오류 회귀 입력", "scope": "demo", "predictions": sample,
+    })
+    assert result.status_code == 201, result.text
+    run = result.json()
+    items = [item for paper in run["report"]["papers"] for item in paper["items"]]
+    assert len(items) == 3
+    assert sum(item["structure_valid"] for item in items) == 2
+    assert run["report"]["counts"]["gold"] == 9
+    assert run["report"]["counts"]["matched"] == 3
+    assert run["is_demo"] is False
+    return run
+
+
 def review_payload(paper, item, **updates):
     result = {"paper_id": paper["paper_id"], "question_id": item["question_id"], "accepted_option_ids": [item["answer_id"]], "rubric": {"plausibility": 2, "learning_alignment": 2, "distinctness": 2, "no_cues": 2}, "gates": {"context_sufficient": True, "no_specialist_knowledge": True, "no_answer_leak": True}, "rationale": "문맥과 전치사 결합을 검토했습니다.", "reviewer": "테스트 검수자"}
     result.update(updates)
@@ -52,6 +79,7 @@ def test_downloaded_compact_sample_is_the_public_contract(client):
     assert schema["question_fields"]["answer_id"]["minimum"] == 0
     assert schema["question_fields"]["answer_id"]["maximum"] == 3
     for paper in predictions:
+        assert len(paper["questions"]) <= 5
         for question in paper["questions"]:
             assert set(question) == {"expression_text", "options", "answer_id"}
             assert all(isinstance(option, str) for option in question["options"])
@@ -60,7 +88,14 @@ def test_downloaded_compact_sample_is_the_public_contract(client):
     assert created.status_code == 201, created.text
     run = created.json()
     assert run["is_demo"] is True
-    assert run["report"]["counts"]["matched"] == 3
+    report = run["report"]
+    assert [len(paper["items"]) for paper in report["papers"]] == [4, 5, 0]
+    assert report["counts"]["gold"] == 9
+    assert report["counts"]["predicted"] == 9
+    assert report["counts"]["matched"] == 9
+    for metric in ("precision_pct", "recall_pct", "f1_pct", "structural_validity_pct"):
+        assert report["metrics"][metric] == 100
+    assert all(item["structure_valid"] for paper in report["papers"] for item in paper["items"])
     item = run["report"]["papers"][0]["items"][0]
     assert item["structure_valid"] is True
     assert item["question_id"]
@@ -73,7 +108,7 @@ def test_compact_nonfirst_answer_supports_review_and_export(client):
     question["options"] = ["with", "of", "to", "for"]
     question["answer_id"] = 2
     paper_id = predictions[0]["paper_id"]
-    created = client.post("/api/runs", headers=HEADERS, json={"name": "세 번째 정답", "scope": "custom", "paper_ids": [paper_id], "predictions": [{"paper_id": paper_id, "questions": [question]}]})
+    created = client.post("/api/runs", headers=HEADERS, json={"name": "세 번째 정답", "scope": "demo", "predictions": [{"paper_id": paper_id, "questions": [question]}]})
     assert created.status_code == 201, created.text
     run = created.json()
     paper = run["report"]["papers"][0]
@@ -95,6 +130,9 @@ def test_legacy_upload_and_saved_record_remain_reviewable(client):
     assert created.status_code == 201, created.text
     run = created.json()
     assert run["is_demo"] is True
+    assert run["report"]["counts"]["gold"] == 9
+    assert run["report"]["counts"]["matched"] == 9
+    assert run["report"]["metrics"]["structural_validity_pct"] == 100
     paper = run["report"]["papers"][0]
     item = paper["items"][0]
     assert item["question_id"] == "demo-0911.3369-valid"
@@ -110,28 +148,46 @@ def test_review_end_to_end_and_audit_export(client):
     assert run["report"]["metrics"]["precision_pct"] == 100
     for paper in run["report"]["papers"]:
         for item in paper["items"]:
-            if item["structure_valid"]:
-                result = client.post(f'/api/runs/{run["id"]}/reviews', headers=HEADERS, json=review_payload(paper, item))
-                assert result.status_code == 200, result.text
+            assert item["structure_valid"] is True
+            result = client.post(f'/api/runs/{run["id"]}/reviews', headers=HEADERS, json=review_payload(paper, item))
+            assert result.status_code == 200, result.text
     saved = client.get(f'/api/runs/{run["id"]}').json()
     assert saved["status"] == "complete"
-    assert 0 < saved["report"]["metrics"]["final_score"] < 100
-    assert saved["report"]["metrics"]["quality_all_pct"] == pytest.approx(66.666667)
+    assert saved["report"]["metrics"]["final_score"] == 100
+    assert saved["report"]["metrics"]["quality_all_pct"] == 100
+    assert saved["report"]["metrics"]["quality_matched_pct"] == 100
     exported = client.get(f'/api/runs/{run["id"]}/export').json()
-    assert len(exported["review_history"]) == 2
+    assert len(exported["review_history"]) == 9
     assert all(h["quality"]["reviewer"] == "테스트 검수자" for h in exported["review_history"])
     csv = client.get(f'/api/runs/{run["id"]}/export?format=csv')
     assert csv.status_code == 200 and "quality_status" in csv.text
     assert len(client.get("/api/runs").json()["items"]) == 1
 
 
+def test_complete_demo_with_temporary_quality_scores_100(client):
+    run = create_demo(client)
+    response = client.post(f'/api/runs/{run["id"]}/skip-judge', headers=HEADERS)
+    assert response.status_code == 200, response.text
+    completed = response.json()
+    assert completed["status"] == "complete"
+    assert completed["report"]["score_mode"] == "temporary"
+    assert completed["report"]["counts"]["quality_temporary"] == 9
+    for metric in ("precision_pct", "recall_pct", "f1_pct", "quality_matched_pct", "final_score"):
+        assert completed["report"]["metrics"][metric] == 100
+    history = client.get(f'/api/runs/{run["id"]}/export').json()["review_history"]
+    assert len(history) == 9
+    assert all(entry["quality"]["source"] == "temporary" for entry in history)
+    assert all(entry["quality"]["option_assessments"] == [] for entry in history)
+
+
 def test_missing_scope_is_not_inferred_from_submission(client):
     sample = client.get("/api/sample").json()
-    result = client.post("/api/runs", headers=HEADERS, json={"name": "불완전 제출", "scope": "all", "predictions": sample["predictions"]})
+    result = client.post("/api/runs", headers=HEADERS, json={"name": "불완전 제출", "scope": "train", "predictions": sample["predictions"]})
     assert result.status_code == 201
     report = result.json()["report"]
-    assert report["counts"]["gold"] == 6188
-    assert report["counts"]["missing_papers"] == 1487
+    dataset = client.app.state.dataset
+    assert report["counts"]["gold"] == sum(len(dataset.labels[pid]) for pid in dataset.splits["train"])
+    assert report["counts"]["missing_papers"] == 1040
     assert report["metrics"]["coverage_pct"] < 1
 
 
@@ -145,7 +201,7 @@ def test_bad_json_and_duplicate_paper_reject_without_run(client):
 
 
 def test_structural_invalid_cannot_be_overridden(client):
-    run = create_demo(client)
+    run = create_error_fixture(client)
     paper, item = next((p, i) for p in run["report"]["papers"] for i in p["items"] if not i["structure_valid"])
     result = client.post(f'/api/runs/{run["id"]}/reviews', headers=HEADERS, json=review_payload(paper, item))
     assert result.status_code == 422
@@ -161,7 +217,7 @@ def test_manual_ambiguity_gates_to_zero(client):
 
 
 def test_manual_answer_correction_recomputes_zero_quality_and_keeps_audit(client):
-    run = create_demo(client)
+    run = create_error_fixture(client)
     valid = [(p, i) for p in run["report"]["papers"] for i in p["items"] if i["structure_valid"]]
     assert len(valid) == 2
     # Reproduce the reported state: all four rubric scores are 2 and all gates

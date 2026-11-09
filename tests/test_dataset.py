@@ -5,6 +5,8 @@ from pathlib import Path
 import pytest
 
 from paperlingo.dataset import Dataset, DatasetError
+from paperlingo.judge import temporary_quality
+from paperlingo.scoring import evaluate, recompute
 
 
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
@@ -18,18 +20,22 @@ def test_real_reference_integrity_and_splits():
     assert summary["expression_count"] == 6188
     assert summary["domain_count"] == 149
     assert summary["zero_gold_count"] == 12
-    assert summary["splits"]["development"] == 1043
-    assert summary["splits"]["validation"] == 149
-    assert summary["splits"]["test"] == 298
+    assert summary["splits"] == {"demo": 3, "train": 1043, "evaluation": 447}
+    assert summary["split_version"] == Dataset.SPLIT_VERSION == "train-evaluation-v1"
+    assert summary["split_seed"] == 42
     assert len(dataset.version) == 64
     assert summary["audit"]["word_boundary_flag_count"] == 0
     assert summary["audit"]["duplicate_abstract_groups"] == []
-    partitions = [set(dataset.splits[name]) for name in ("development", "validation", "test")]
+    partitions = [set(dataset.splits[name]) for name in ("train", "evaluation")]
     assert set.union(*partitions) == set(dataset.papers)
-    assert not (partitions[0] & partitions[1] or partitions[0] & partitions[2] or partitions[1] & partitions[2])
+    assert not partitions[0] & partitions[1]
+    assert [len(partition) for partition in partitions] == [1043, 447]
+    assert dataset.splits["demo"] == ["0911.3369", "1109.3182", "1709.01217"]
+    assert set(dataset.splits["demo"]) <= partitions[0]
+    assert not set(dataset.splits["demo"]) & partitions[1]
     for domain in {paper["domain"]["code"] for paper in dataset.papers.values()}:
         counts = [sum(dataset.papers[id_]["domain"]["code"] == domain for id_ in part) for part in partitions]
-        assert counts == [7, 1, 2]
+        assert counts == [7, 3]
     assert dataset.splits == Dataset(DATA_DIR).splits
     assert dataset.version == Dataset(DATA_DIR).version
     assert before == {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in DATA_DIR.glob("*.jsonl")}
@@ -45,6 +51,62 @@ def test_demo_has_empty_gold_and_explicit_authored_samples():
     assert all("직접 작성" in q["learning_point"] for row in demo for q in row["questions"])
     demo[0]["questions"][0]["expression_text"] = "tampered"
     assert dataset.demo_predictions()[0]["questions"][0]["expression_text"] != "tampered"
+
+
+@pytest.mark.parametrize("compact", [False, True])
+def test_demo_covers_all_nine_gold_expressions_without_duplicates(compact):
+    dataset = Dataset(DATA_DIR)
+    predictions = dataset.demo_predictions(compact=compact)
+    assert [row["paper_id"] for row in predictions] == ["0911.3369", "1109.3182", "1709.01217"]
+    assert [len(row["questions"]) for row in predictions] == [4, 5, 0]
+    for row in predictions:
+        texts = [question["expression_text"] for question in row["questions"]]
+        assert len(texts) == len(set(texts)) <= 5
+        assert set(texts) == {expression["text"] for expression in dataset.labels[row["paper_id"]]}
+    report = evaluate(dataset, predictions, dataset.splits["demo"], "demo")
+    assert report["counts"]["gold"] == report["counts"]["predicted"] == report["counts"]["matched"] == 9
+    assert report["counts"]["quality_pending"] == 9
+    for metric in ("precision_pct", "recall_pct", "f1_pct", "structural_validity_pct", "coverage_pct", "empty_gold_abstention_pct"):
+        assert report["metrics"][metric] == 100
+    assert report["metrics"]["final_score"] is None
+    assert all(not item["issues"] for paper in report["papers"] for item in paper["items"])
+    assert all(not paper["missing_expressions"] for paper in report["papers"])
+    # Temporary full credit demonstrates the complete scoring path; it does not
+    # claim that the authored choices have received real quality validation.
+    for paper in report["papers"]:
+        for item in paper["items"]:
+            item["quality"] = temporary_quality(item)
+    recompute(report)
+    assert report["metrics"]["final_score"] == 100
+    assert report["metrics"]["quality_matched_pct"] == 100
+    assert report["counts"]["quality_temporary"] == 9
+    assert report["score_mode"] == "temporary"
+    assert report["metrics"]["unique_answer_rate_pct"] == 0
+
+
+def test_demo_keeps_preferred_first_questions_and_stable_legacy_identifiers():
+    dataset = Dataset(DATA_DIR)
+    first, second, empty = dataset.demo_predictions()
+    assert first["questions"][0]["expression_text"] == "identical to"
+    assert second["questions"][0]["expression_text"] == "consistent with"
+    assert first["questions"][0]["question_id"] == "demo-0911.3369-valid"
+    assert second["questions"][0]["question_id"] == "demo-1109.3182-valid"
+    for row in (first, second):
+        assert [question["question_id"] for question in row["questions"][1:]] == [
+            f"demo-{row['paper_id']}-expression-{position}" for position in range(2, len(row["questions"]) + 1)
+        ]
+    assert empty["questions"] == []
+
+
+def test_downloadable_compact_file_matches_live_demo_and_returns_fresh_copies():
+    dataset = Dataset(DATA_DIR)
+    path = DATA_DIR.parent / "examples" / "predictions.jsonl"
+    saved = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    assert saved == dataset.demo_predictions(compact=True)
+    altered = dataset.demo_predictions(compact=True)
+    altered[0]["questions"][0]["options"][0] = "tampered"
+    altered[1]["questions"].clear()
+    assert dataset.demo_predictions(compact=True) == saved
 
 
 def write_fixture(tmp_path, papers, labels):
@@ -79,6 +141,48 @@ def test_dataset_version_changes_with_label_edits(tmp_path):
     labels[0]["expressions"][0]["text"] = "result"
     write_fixture(tmp_path, papers, labels)
     assert Dataset(tmp_path).version != original
+
+
+def test_split_configuration_does_not_change_source_dataset_version(monkeypatch):
+    original = Dataset(DATA_DIR)
+    monkeypatch.setattr(Dataset, "SPLIT_SEED", 43)
+    monkeypatch.setattr(Dataset, "SPLIT_VERSION", "test-alternate-policy")
+    alternate = Dataset(DATA_DIR)
+    assert alternate.splits != original.splits
+    assert alternate.version == original.version
+    assert alternate.summary()["split_version"] == "test-alternate-policy"
+    assert set(alternate.splits["demo"]) <= set(alternate.splits["train"])
+
+
+def test_splits_ignore_source_row_order_and_preserve_references(tmp_path):
+    papers = [
+        {"paper_id": f"{domain}-{index}", "domain": domain, "abstract": f"A valuable result {index}."}
+        for domain in ("first", "second") for index in range(10)
+    ]
+    labels = [
+        {"paper_id": paper["paper_id"], "expressions": [{"text": "valuable"}]}
+        for paper in papers
+    ]
+    write_fixture(tmp_path, papers, labels)
+    original = Dataset(tmp_path)
+    assert original.papers == {paper["paper_id"]: paper for paper in papers}
+    assert original.labels == {row["paper_id"]: row["expressions"] for row in labels}
+    write_fixture(tmp_path, list(reversed(papers)), list(reversed(labels)))
+    reordered = Dataset(tmp_path)
+    assert reordered.splits == original.splits
+    for domain in ("first", "second"):
+        assert [
+            sum(reordered.papers[paper_id]["domain"] == domain for paper_id in reordered.splits[split])
+            for split in ("train", "evaluation")
+        ] == [7, 3]
+
+
+def test_tiny_dataset_keeps_all_public_demo_papers_in_training(tmp_path):
+    papers = [{"paper_id": "p", "abstract": "A valuable result."}]
+    labels = [{"paper_id": "p", "expressions": [{"text": "valuable"}]}]
+    write_fixture(tmp_path, papers, labels)
+    dataset = Dataset(tmp_path)
+    assert dataset.splits == {"demo": ["p"], "train": ["p"], "evaluation": []}
 
 
 def test_search_returns_summary_not_entire_dataset():

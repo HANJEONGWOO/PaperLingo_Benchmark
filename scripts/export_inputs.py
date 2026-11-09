@@ -12,7 +12,7 @@ from paperlingo.config import ROOT
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--scope", choices=["demo", "development", "validation", "test", "all"], default="demo")
+    parser.add_argument("--scope", choices=["demo", "train", "evaluation"], default="demo")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     dataset = Dataset(ROOT / "data")
@@ -22,7 +22,8 @@ def main():
             paper = dataset.papers[paper_id]
             record = {key: paper[key] for key in ("paper_id", "paper_name", "domain", "abstract")}
             stream.write(json.dumps(record, ensure_ascii=False) + "\n")
-    manifest = {"scope": args.scope, "paper_ids": dataset.splits[args.scope], "dataset_version": dataset.version, "seed": dataset.SPLIT_SEED}
+    manifest = {"scope": args.scope, "paper_ids": dataset.splits[args.scope], "dataset_version": dataset.version,
+                "split_version": dataset.SPLIT_VERSION, "seed": dataset.SPLIT_SEED}
     args.output.with_suffix(args.output.suffix + ".manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"Exported {len(manifest['paper_ids'])} abstracts (no labels) to {args.output}")
 

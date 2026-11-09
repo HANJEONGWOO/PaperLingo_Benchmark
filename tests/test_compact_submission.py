@@ -57,7 +57,7 @@ def test_compact_normalization_preserves_internal_contract_and_unicode(dataset):
     assert item["input_format"] == "compact-v1"
     assert report["submission_formats"] == ["compact-v1"]
     assert report["inference_policy"]["version"] == "compact-first-sentence-v1"
-    assert report["metrics_version"] == "exact-prq-v2"
+    assert report["metrics_version"] == "exact-rq-v3"
     assert report["metrics"]["precision_pct"] == 100
     assert report["metrics"]["recall_pct"] == 100
     assert report["metrics"]["final_score"] is None

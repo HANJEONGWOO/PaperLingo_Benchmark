@@ -48,6 +48,7 @@ class Dataset:
     """Load original JSONL files without modifying them or repairing labels."""
 
     SPLIT_SEED = 42
+    SPLIT_VERSION = "train-evaluation-v1"
 
     def __init__(self, data_dir: Path):
         self.data_dir = Path(data_dir)
@@ -162,19 +163,6 @@ class Dataset:
             "warnings": warnings,
         }
 
-        by_domain = defaultdict(list)
-        for paper_id, paper in self.papers.items():
-            by_domain[domain_code(paper)].append(paper_id)
-        self.splits: dict[str, list[str]] = {key: [] for key in ("development", "validation", "test")}
-        rng = random.Random(self.SPLIT_SEED)
-        for domain in sorted(by_domain):
-            ids = sorted(by_domain[domain])
-            rng.shuffle(ids)
-            train_end, validation_count = len(ids) * 7 // 10, len(ids) // 10
-            self.splits["development"].extend(ids[:train_end])
-            self.splits["validation"].extend(ids[train_end:train_end + validation_count])
-            self.splits["test"].extend(ids[train_end + validation_count:])
-        self.splits["all"] = sorted(self.papers)
         preferred = [paper_id for paper_id in ("0911.3369", "1109.3182") if paper_id in self.papers and self.labels[paper_id]]
         for paper_id in sorted(self.papers):
             if len(preferred) >= 2:
@@ -184,7 +172,27 @@ class Dataset:
         empty = [paper_id for paper_id in sorted(self.papers) if not self.labels[paper_id]]
         if empty:
             preferred.append("1709.01217" if "1709.01217" in empty else empty[0])
-        self.splits["demo"] = preferred
+        self.splits: dict[str, list[str]] = {"demo": preferred, "train": [], "evaluation": []}
+        demo_ids = set(preferred)
+        by_domain = defaultdict(list)
+        for paper_id, paper in self.papers.items():
+            by_domain[domain_code(paper)].append(paper_id)
+        rng = random.Random(self.SPLIT_SEED)
+        for domain in sorted(by_domain):
+            ids = sorted(by_domain[domain])
+            rng.shuffle(ids)
+            # Public demo answers must never leak into the evaluation scope.
+            # Tiny custom datasets may need extra training capacity for demos;
+            # the reference dataset has ten papers per domain and splits 7/3.
+            train_count = max(len(ids) * 7 // 10, sum(paper_id in demo_ids for paper_id in ids))
+            train, evaluation = ids[:train_count], ids[train_count:]
+            replacements = [index for index, paper_id in enumerate(train) if paper_id not in demo_ids]
+            for index, paper_id in enumerate(evaluation):
+                if paper_id in demo_ids:
+                    replacement = replacements.pop()
+                    train[replacement], evaluation[index] = paper_id, train[replacement]
+            self.splits["train"].extend(train)
+            self.splits["evaluation"].extend(evaluation)
 
     def summary(self) -> dict:
         return {
@@ -194,6 +202,7 @@ class Dataset:
             "zero_gold_count": sum(not expressions for expressions in self.labels.values()),
             "version": self.version,
             "split_seed": self.SPLIT_SEED,
+            "split_version": self.SPLIT_VERSION,
             "splits": {key: len(ids) for key, ids in self.splits.items()},
             "audit": deepcopy(self.audit),
         }
@@ -211,7 +220,11 @@ class Dataset:
         return {"items": records[offset:offset + limit], "total": len(records)}
 
     def demo_predictions(self, *, compact: bool = False) -> list[dict]:
-        """Authored format examples, never claimed as measured model output."""
+        """Authored examples covering all demo references, not model output.
+
+        Exact-expression coverage and structural validity are intentional. The
+        quality of the answer choices still requires a separate assessment.
+        """
         predictions = []
         for index, paper_id in enumerate(self.splits["demo"]):
             labels = self.labels[paper_id]
@@ -219,12 +232,11 @@ class Dataset:
             if labels:
                 preferred = "identical to" if index == 0 else "consistent with"
                 expression = next((item for item in labels if item["text"] == preferred), labels[0])
-                questions.append(self._example_question(paper_id, expression, "valid"))
-                if index == 0 and len(labels) > 1:
-                    other = next(item for item in labels if item["text"] != expression["text"])
-                    invalid = self._example_question(paper_id, other, "duplicate-options")
-                    invalid["options"][1]["text"] = invalid["options"][0]["text"]
-                    questions.append(invalid)
+                ordered = [expression, *(item for item in labels if item["text"] != expression["text"])]
+                questions = [
+                    self._example_question(paper_id, item, "valid" if position == 0 else f"expression-{position + 1}")
+                    for position, item in enumerate(ordered)
+                ]
             predictions.append({"paper_id": paper_id, "questions": questions})
         if compact:
             return [{"paper_id": paper["paper_id"], "questions": [
@@ -250,7 +262,14 @@ class Dataset:
             context_start = 0
         next_period = abstract.find(". ", end)
         context_end = len(abstract) if next_period < 0 else next_period + 1
-        distractors = [word for word in ("with", "of", "for", "to", "at", "from") if word != answer][:3]
+        targeted_distractors = {
+            "that": ["what", "which", "whom"],
+            "than": ["then", "that", "when"],
+            "exhibit": ["exhibiting", "exhibited", "exhibits"],
+        }
+        distractors = targeted_distractors.get(answer)
+        if distractors is None:
+            distractors = [word for word in ("with", "of", "for", "to", "at", "from") if word != answer][:3]
         return {
             "question_id": f"demo-{paper_id}-{suffix}",
             "expression_text": text,
