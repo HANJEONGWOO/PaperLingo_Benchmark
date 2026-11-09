@@ -47,7 +47,7 @@ def settings(tmp_path):
               {"paper_id": "p2", "expressions": [{"text": EXPRESSIONS[0]}]}]
     for filename, rows in (("abstract_data.jsonl", papers), ("abstract_labels_v2.jsonl", labels)):
         (data / filename).write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
-    return Settings(data_dir=data, runtime_dir=tmp_path / "runtime",
+    return Settings(review_mode="llm", data_dir=data, runtime_dir=tmp_path / "runtime",
                     judge_base_url="http://never-called.invalid/v1", judge_model="mock-only",
                     judge_concurrency=1, judge_batch_size=2)
 

@@ -14,7 +14,7 @@ HEADERS = {"X-Requested-With": "PaperLingo"}
 
 @pytest.fixture
 def client(tmp_path):
-    with TestClient(create_app(Settings(runtime_dir=tmp_path))) as c:
+    with TestClient(create_app(Settings(review_mode="llm", runtime_dir=tmp_path))) as c:
         yield c
 
 
@@ -255,7 +255,7 @@ def test_no_llm_call_without_configuration(client):
 
 
 def test_auth_session_csrf_and_logout(tmp_path):
-    with TestClient(create_app(Settings(runtime_dir=tmp_path, password="test-only-password"))) as client:
+    with TestClient(create_app(Settings(review_mode="llm", runtime_dir=tmp_path, password="test-only-password"))) as client:
         assert client.get("/api/session").json()["auth_required"] is True
         assert client.get("/api/config").status_code == 401
         assert client.post("/api/login", json={"password": "test-only-password"}).status_code == 403
@@ -269,14 +269,14 @@ def test_auth_session_csrf_and_logout(tmp_path):
 
 
 def test_public_read_and_private_write(tmp_path):
-    with TestClient(create_app(Settings(runtime_dir=tmp_path, password="test-only", public_read=True))) as client:
+    with TestClient(create_app(Settings(review_mode="llm", runtime_dir=tmp_path, password="test-only", public_read=True))) as client:
         assert client.get("/api/config").status_code == 200
         sample = client.get("/api/sample").json()["predictions"]
         assert client.post("/api/runs", headers=HEADERS, json={"name": "blocked", "scope": "demo", "predictions": sample}).status_code == 401
 
 
 def test_explicit_public_access_allows_remote_submission(tmp_path):
-    settings = Settings(runtime_dir=tmp_path, public_access=True, host="0.0.0.0")
+    settings = Settings(review_mode="llm", runtime_dir=tmp_path, public_access=True, host="0.0.0.0")
     with TestClient(create_app(settings), client=("192.0.2.10", 12345)) as client:
         assert client.get("/api/session").json()["can_manage"] is True
         assert client.get("/api/session").json()["auth_required"] is False
@@ -285,12 +285,12 @@ def test_explicit_public_access_allows_remote_submission(tmp_path):
 
 
 def test_remote_client_cannot_use_no_password_mode(tmp_path):
-    with TestClient(create_app(Settings(runtime_dir=tmp_path)), client=("192.0.2.10", 12345)) as client:
+    with TestClient(create_app(Settings(review_mode="llm", runtime_dir=tmp_path)), client=("192.0.2.10", 12345)) as client:
         assert client.get("/api/config").status_code == 401
 
 
 def test_password_login_throttles(tmp_path):
-    with TestClient(create_app(Settings(runtime_dir=tmp_path, password="test-only"))) as client:
+    with TestClient(create_app(Settings(review_mode="llm", runtime_dir=tmp_path, password="test-only"))) as client:
         for _ in range(5):
             assert client.post("/api/login", headers=HEADERS, json={"password": "wrong"}).status_code == 401
         assert client.post("/api/login", headers=HEADERS, json={"password": "wrong"}).status_code == 429
@@ -303,7 +303,7 @@ def test_llm_background_uses_mock_and_never_returns_key(tmp_path, monkeypatch):
         return quality_from_review(item, {"accepted_option_ids": [item["answer_id"]], "rubric": {"plausibility": 1, "learning_alignment": 2, "distinctness": 2, "no_cues": 2}, "gates": {"context_sufficient": True, "no_specialist_knowledge": True, "no_answer_leak": True}, "rationale": "모의 응답", "reviewer": "test-only"})
 
     monkeypatch.setattr("paperlingo.app.judge_item", mock_judge)
-    cfg = Settings(runtime_dir=tmp_path, judge_base_url="https://judge.invalid/v1", judge_model="mock-model", judge_api_key="secret-never-return")
+    cfg = Settings(review_mode="llm", runtime_dir=tmp_path, judge_base_url="https://judge.invalid/v1", judge_model="mock-model", judge_api_key="secret-never-return")
     with TestClient(create_app(cfg)) as client:
         assert "secret-never-return" not in client.get("/api/config").text
         run = create_demo(client)
@@ -324,7 +324,7 @@ def test_csv_formula_strings_are_escaped():
 
 
 def test_interrupted_job_is_recovered(tmp_path):
-    settings = Settings(runtime_dir=tmp_path)
+    settings = Settings(review_mode="llm", runtime_dir=tmp_path)
     app = create_app(settings)
     with TestClient(app) as client:
         run = create_demo(client)

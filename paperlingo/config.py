@@ -30,6 +30,7 @@ class Settings:
     judge_concurrency: int = 2
     judge_batch_size: int = 100
     judge_timeout: float = 90.0
+    review_mode: str = "code"
     max_request_bytes: int = 16 * 1024 * 1024
     max_runs: int = 200
     session_hours: int = 12
@@ -53,11 +54,14 @@ class Settings:
             judge_concurrency=max(1, min(8, int(os.getenv("JUDGE_CONCURRENCY", "2")))),
             judge_batch_size=max(1, min(1000, int(os.getenv("JUDGE_BATCH_SIZE", "100")))),
             judge_timeout=float(os.getenv("JUDGE_TIMEOUT", "90")),
+            review_mode=os.getenv("PAPERLINGO_REVIEW_MODE", "code").strip(),
         )
         config.validate()
         return config
 
     def validate(self):
+        if self.review_mode not in {"code", "llm"}:
+            raise ValueError("PAPERLINGO_REVIEW_MODE는 code 또는 llm이어야 합니다.")
         if self.host not in {"localhost", "127.0.0.1", "::1"} and not self.password and not self.public_access:
             raise ValueError("외부 접속에는 PAPERLINGO_PASSWORD를 설정하세요.")
         if self.public_read and not self.password and not self.public_access:

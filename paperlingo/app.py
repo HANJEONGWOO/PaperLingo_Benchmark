@@ -23,12 +23,13 @@ from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .config import Settings, ROOT
+from .code_review import CODE_REVIEW_POLICY
 from .dataset import Dataset
 from .judge import JudgeConfig, judge_item, quality_from_review, temporary_quality, QUALITY_POLICY_VERSION
 from .scoring import METRICS_VERSION, SubmissionError, evaluate, recompute
 from .storage import Store, now, report_status
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 COOKIE = "paperlingo_session"
 
 
@@ -134,7 +135,7 @@ def create_app(settings: Settings | None = None):
     @asynccontextmanager
     async def lifespan(app):
         store.recover_interrupted()
-        if cfg.judge_configured:
+        if cfg.review_mode == "llm" and cfg.judge_configured:
             # Resume interrupted work and finish legacy records that were left
             # waiting for manual review. Completed reviews are never selected.
             async with write_lock:
@@ -260,11 +261,16 @@ def create_app(settings: Settings | None = None):
     @app.get("/api/config")
     def config(request: Request):
         need_read(request)
-        return {"dataset": dataset.summary(), "judge": {"configured": cfg.judge_configured, "automatic": cfg.judge_configured, "model": cfg.judge_model, "base_url": cfg.judge_base_url, "concurrency": cfg.judge_concurrency}, "auth_required": bool(cfg.password) and not cfg.public_access, "public_read": cfg.public_read or cfg.public_access, "public_access": cfg.public_access, "can_manage": is_admin(request), "limits": {"max_upload_bytes": cfg.max_request_bytes, "judge_batch_size": cfg.judge_batch_size, "max_runs": cfg.max_runs}, "metrics_version": METRICS_VERSION, "version": VERSION}
+        return {"dataset": dataset.summary(), "review_mode": cfg.review_mode,
+                "quality_policy_version": CODE_REVIEW_POLICY if cfg.review_mode == "code" else QUALITY_POLICY_VERSION,
+                "judge": {"configured": cfg.judge_configured, "automatic": cfg.review_mode == "llm" and cfg.judge_configured, "model": cfg.judge_model, "base_url": cfg.judge_base_url, "concurrency": cfg.judge_concurrency}, "auth_required": bool(cfg.password) and not cfg.public_access, "public_read": cfg.public_read or cfg.public_access, "public_access": cfg.public_access, "can_manage": is_admin(request), "limits": {"max_upload_bytes": cfg.max_request_bytes, "judge_batch_size": cfg.judge_batch_size, "max_runs": cfg.max_runs}, "metrics_version": METRICS_VERSION, "version": VERSION}
 
     @app.get("/api/judge/status")
     async def judge_status(request: Request):
         need_read(request)
+        if cfg.review_mode == "code":
+            return {"mode": "code", "configured": False, "ready": True, "model": "",
+                    "message": "코드로 4개 항목을 즉시 검사합니다. LLM과 문맥 충분성 검사는 사용하지 않습니다."}
         if not cfg.judge_configured:
             return {"configured": False, "ready": False, "model": "", "message": "LLM 평가 모델이 설정되지 않았습니다."}
         if judge_health_cache["value"] is not None and time.monotonic() - judge_health_cache["checked"] < 5:
@@ -409,11 +415,15 @@ def create_app(settings: Settings | None = None):
         except SubmissionError as exc:
             raise HTTPException(422, {"message": "제출 형식을 확인하세요.", "errors": exc.errors}) from None
         report["split_version"] = dataset.SPLIT_VERSION
+        if cfg.review_mode == "code":
+            report["quality_policy_version"] = CODE_REVIEW_POLICY
+            report["review_mode"] = "code"
+            recompute(report)
         async with write_lock:
             if store.count() >= cfg.max_runs:
                 raise HTTPException(409, "평가 기록 저장 한도에 도달했습니다. 관리자가 백업 후 저장소를 정리해야 합니다.")
             run = store.create(body.name.strip(), report, predictions == dataset.demo_predictions(compact=True) or predictions == dataset.demo_predictions())
-            if cfg.judge_configured:
+            if cfg.review_mode == "llm" and cfg.judge_configured:
                 enqueue_judge(run, automatic=True)
             return run
 
@@ -528,10 +538,14 @@ def create_app(settings: Settings | None = None):
     @app.post("/api/runs/{run_id}/judge")
     async def start_judge(run_id: str, request: Request):
         need_admin(request)
+        if cfg.review_mode == "code":
+            raise HTTPException(409, "현재는 코드 검사 모드입니다. LLM 검수는 실행하지 않습니다.")
         if not cfg.judge_configured:
             raise HTTPException(409, "서버의 JUDGE_BASE_URL과 JUDGE_MODEL을 설정하세요. 필요하면 JUDGE_API_KEY도 설정하세요.")
         async with write_lock:
             run = get_run(run_id)
+            if run["report"].get("quality_policy_version") == CODE_REVIEW_POLICY:
+                raise HTTPException(409, "코드 검사 기록은 LLM 판정으로 변경하지 않습니다. 다른 방식의 검수는 새 평가로 생성하세요.")
             if run["report"]["dataset_version"] != dataset.version:
                 raise HTTPException(409, "데이터셋 버전이 변경되었습니다. 새 평가 기록을 생성하세요.")
             if run["status"] in {"queued", "judging"}:
@@ -545,6 +559,8 @@ def create_app(settings: Settings | None = None):
         need_admin(request)
         async with write_lock:
             run = get_run(run_id)
+            if run["report"].get("quality_policy_version") == CODE_REVIEW_POLICY:
+                raise HTTPException(409, "코드 검사는 이미 완료되었습니다. 검사 결과를 임시 만점으로 덮어쓸 수 없습니다.")
             queued_task = jobs.get(run_id) if run["status"] == "queued" else None
             valid = [(p, i) for p in run["report"]["papers"] for i in p["items"] if i["structure_valid"]]
             if not valid:
@@ -574,6 +590,8 @@ def create_app(settings: Settings | None = None):
         need_admin(request)
         async with write_lock:
             run = get_run(run_id)
+            if run["report"].get("quality_policy_version") == CODE_REVIEW_POLICY:
+                raise HTTPException(409, "코드 검사 결과는 통과 또는 실패로 고정됩니다. 입력을 수정해 새 평가를 생성하세요.")
             if run["status"] in {"queued", "judging"}:
                 raise HTTPException(409, "LLM 평가가 끝난 뒤 수동 검수를 저장하세요.")
             item = next((i for p in run["report"]["papers"] if p["paper_id"] == body.get("paper_id") for i in p["items"] if i["question_id"] == body.get("question_id")), None)
@@ -601,13 +619,14 @@ def create_app(settings: Settings | None = None):
             return Response(json.dumps(run, ensure_ascii=False, indent=2), media_type="application/json", headers={"Content-Disposition": f'attachment; filename="paperlingo-{run_id}.json"'})
         buffer = io.StringIO()
         writer = csv.writer(buffer)
-        writer.writerow(["paper_id", "question_id", "expression", "matched", "structure_valid", "quality_status", "quality_source", "quality_score_pct", "accepted_options", "answer_id", "issues", "rationale", "score_mode", "quality_policy", "metrics_version"])
+        writer.writerow(["paper_id", "question_id", "expression", "matched", "structure_valid", "quality_status", "quality_source", "quality_score_pct", "accepted_options", "answer_id", "issues", "rationale", "score_mode", "quality_policy", "metrics_version", "check_result", "option_format", "no_duplicates", "designated_answer", "unique_source_answer", "source_match_options"])
         for paper in run["report"]["papers"]:
             if not paper["items"]:
-                writer.writerow([csv_value(paper["paper_id"]), "", "", "", "", "empty_submission" if paper["submitted"] else "missing_submission"] + [""] * 6 + [run["report"].get("score_mode", "reviewed"), "", run["report"].get("metrics_version")])
+                writer.writerow([csv_value(paper["paper_id"]), "", "", "", "", "empty_submission" if paper["submitted"] else "missing_submission"] + [""] * 6 + [run["report"].get("score_mode", "reviewed"), "", run["report"].get("metrics_version")] + [""] * 6)
             for item in paper["items"]:
                 q = item["quality"]
-                writer.writerow([csv_value(x) for x in [paper["paper_id"], item["question_id"], item["expression_text"], item["matched"], item["structure_valid"], q["status"], q["source"], None if q["q"] is None else round(q["q"] * 100, 2), ",".join(q.get("accepted_option_ids", [])), item.get("answer_id", ""), "; ".join(i["message"] for i in item["issues"]), q.get("rationale", ""), run["report"].get("score_mode", "reviewed"), q.get("scoring_policy", ""), run["report"].get("metrics_version")]])
+                checks = {check["key"]: check["passed"] for check in q.get("checks", [])}
+                writer.writerow([csv_value(x) for x in [paper["paper_id"], item["question_id"], item["expression_text"], item["matched"], item["structure_valid"], q["status"], q["source"], None if q["q"] is None else round(q["q"] * 100, 2), ",".join(q.get("accepted_option_ids", [])), item.get("answer_id", ""), "; ".join(i["message"] for i in item["issues"]), q.get("rationale", ""), run["report"].get("score_mode", "reviewed"), q.get("scoring_policy", ""), run["report"].get("metrics_version"), q.get("result", ""), *[checks.get(key, "") for key in ("option_format", "no_duplicates", "designated_answer", "unique_source_answer")], ",".join(q.get("source_match_option_ids", []))]])
         return Response("\ufeff" + buffer.getvalue(), media_type="text/csv; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="paperlingo-{run_id}.csv"'})
 
     static = Path(__file__).parent / "static"

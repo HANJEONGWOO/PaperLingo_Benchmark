@@ -52,7 +52,7 @@ def settings(tmp_path):
     ]
     for filename, rows in (("abstract_data.jsonl", papers), ("abstract_labels_v2.jsonl", labels)):
         (data_dir / filename).write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
-    return Settings(data_dir=data_dir, runtime_dir=tmp_path / "runtime", judge_concurrency=1)
+    return Settings(review_mode="llm", data_dir=data_dir, runtime_dir=tmp_path / "runtime", judge_concurrency=1)
 
 
 def predictions(count=3):

@@ -18,7 +18,7 @@ HEADERS = {"X-Requested-With": "PaperLingo", "Content-Type": "application/json"}
 
 @pytest.fixture
 def client(tmp_path):
-    app = create_app(Settings(runtime_dir=tmp_path))
+    app = create_app(Settings(review_mode="llm", runtime_dir=tmp_path))
     with TestClient(app, raise_server_exceptions=False) as http:
         yield http, app
 
@@ -111,7 +111,7 @@ def test_malformed_options_are_scoreable_without_server_error(client):
 
 
 def test_public_access_allows_remote_upload_and_review(tmp_path):
-    app = create_app(Settings(runtime_dir=tmp_path, public_access=True, host="0.0.0.0"))
+    app = create_app(Settings(review_mode="llm", runtime_dir=tmp_path, public_access=True, host="0.0.0.0"))
     with TestClient(app, client=("192.0.2.12", 54321)) as http:
         assert http.get("/api/session").json()["can_manage"] is True
         sample = http.get("/api/sample").json()["predictions"]
@@ -158,7 +158,7 @@ def test_failed_job_does_not_release_guard_with_live_sibling_calls(tmp_path, mon
                 state["active"] -= 1
 
     monkeypatch.setattr("paperlingo.app.judge_item", unexpected_judge)
-    app = create_app(Settings(runtime_dir=tmp_path, judge_base_url="http://localhost:1234/v1", judge_model="fixture", judge_concurrency=2))
+    app = create_app(Settings(review_mode="llm", runtime_dir=tmp_path, judge_base_url="http://localhost:1234/v1", judge_model="fixture", judge_concurrency=2))
     with TestClient(app) as http:
         sample = http.get("/api/sample").json()["predictions"]
         run = http.post("/api/runs", headers=HEADERS, json={"name": "job lifecycle", "scope": "demo", "predictions": sample}).json()

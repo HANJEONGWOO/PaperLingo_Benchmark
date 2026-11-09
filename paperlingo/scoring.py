@@ -8,9 +8,9 @@ from __future__ import annotations
 
 from copy import deepcopy
 import math
-import unicodedata
 
 from .dataset import Dataset, domain_code, occurrences, word_boundary
+from .code_review import CODE_REVIEW_POLICY, code_quality, normalize_option
 from .submission import COMPACT_FIELDS, INFERENCE_POLICY, generated_question_id, normalize_question, question_format
 
 
@@ -189,7 +189,7 @@ def _validate_item(question: dict, abstract: str, *, duplicate: bool, initial_is
             if not isinstance(option_text, str) or not option_text.strip() or len(option_text) > 1000:
                 issue("invalid_option_text", "선택지 text는 1~1000자의 문자열이어야 합니다.")
                 continue
-            normalized = " ".join(unicodedata.normalize("NFKC", option_text).casefold().split())
+            normalized = normalize_option(option_text)
             if normalized in normalized_texts:
                 issue("duplicate_option_text", "대소문자·공백·유니코드 표기를 정규화하면 중복되는 선택지가 있습니다.")
             normalized_texts.add(normalized)
@@ -276,9 +276,14 @@ def recompute(report: dict) -> dict:
     """
     papers = report["papers"]
     items = [item for paper in papers for item in paper["items"]]
+    code_only = report.get("quality_policy_version") == CODE_REVIEW_POLICY
+    if code_only:
+        for paper in papers:
+            for item in paper["items"]:
+                item["quality"] = code_quality(item, paper["abstract"])
     for item in items:
         # Structural failures cannot be overridden by human or model reviews.
-        if not item.get("structure_valid"):
+        if not item.get("structure_valid") and not code_only:
             item["quality"] = empty_quality(structural=True)
     matched_items = [item for item in items if item["matched"]]
     gold = sum(len(paper["gold_expressions"]) for paper in papers)
@@ -331,17 +336,24 @@ def recompute(report: dict) -> dict:
         "quality_temporary": temporary,
         "review_recommended": review_recommended,
     }
-    report["score_mode"] = "temporary" if temporary else "reviewed"
+    report["score_mode"] = "code" if code_only else "temporary" if temporary else "reviewed"
+    if code_only:
+        report["counts"].update(code_passed=sum(item["quality"]["result"] == "pass" for item in items),
+                                code_failed=sum(item["quality"]["result"] == "fail" for item in items))
     report["metrics"] = {
         "precision_pct": _percentage(precision),
         "recall_pct": _percentage(recall),
         "f1_pct": _percentage(f1),
         "quality_all_pct": _percentage(quality_all),
         "quality_matched_pct": _percentage(quality_matched),
-        "unique_answer_rate_pct": _percentage(sum(unique_answer(item) for item in items) / predicted if all_done and predicted else None),
+        "unique_answer_rate_pct": None if code_only else _percentage(sum(unique_answer(item) for item in items) / predicted if all_done and predicted else None),
         "structural_validity_pct": _percentage(sum(item["structure_valid"] for item in items) / predicted if predicted else None),
         "coverage_pct": _percentage(submitted / len(papers) if papers else None),
         "empty_gold_abstention_pct": _percentage(abstentions / len(empty_gold) if empty_gold else None),
         "final_score": _percentage(final),
     }
+    if code_only:
+        report["metrics"]["source_unique_answer_rate_pct"] = _percentage(
+            sum(next(check["passed"] for check in item["quality"]["checks"] if check["key"] == "unique_source_answer")
+                for item in items) / predicted if predicted else None)
     return report
