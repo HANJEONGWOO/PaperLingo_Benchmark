@@ -1,4 +1,4 @@
-"""Fixed training/evaluation scopes and complete, aligned public downloads."""
+"""Aligned training downloads and held-out evaluation references."""
 
 import json
 
@@ -30,22 +30,35 @@ def read_download(client, scope, kind):
 
 
 @pytest.mark.parametrize("scope, count", [("train", 1043), ("evaluation", 447)])
-def test_papers_and_labels_are_aligned_complete_source_subsets(client, scope, count):
+def test_papers_are_complete_source_subsets_without_labels(client, scope, count):
     dataset = client.app.state.dataset
     papers = read_download(client, scope, "papers")
-    labels = read_download(client, scope, "labels")
     ids = dataset.splits[scope]
-    assert len(papers) == len(labels) == count
-    assert [row["paper_id"] for row in papers] == [row["paper_id"] for row in labels] == ids
-    for paper, label in zip(papers, labels):
+    assert len(papers) == count
+    assert [row["paper_id"] for row in papers] == ids
+    for paper in papers:
         original = dataset.papers[paper["paper_id"]]
         assert paper["abstract"] == original["abstract"]
         assert paper["paper_name"] == original["paper_name"]
         assert "expressions" not in paper
         assert "abstract_original" not in paper
-        assert label == {"paper_id": paper["paper_id"], "expressions": dataset.labels[paper["paper_id"]]}
-    # Labels in the evaluation split are deliberately public, as requested.
+
+
+def test_training_labels_remain_complete_and_aligned(client):
+    dataset = client.app.state.dataset
+    labels = read_download(client, "train", "labels")
+    assert [row["paper_id"] for row in labels] == dataset.splits["train"]
+    for label in labels:
+        assert label == {"paper_id": label["paper_id"], "expressions": dataset.labels[label["paper_id"]]}
     assert any(row["expressions"] for row in labels)
+
+
+@pytest.mark.parametrize("kind", ["labels", "answers"])
+@pytest.mark.parametrize("query", ["", "?scope=train&download=1"])
+def test_evaluation_reference_downloads_cannot_be_requested_directly(client, kind, query):
+    response = client.get(f"/api/datasets/evaluation/{kind}{query}")
+    assert response.status_code == 404
+    assert "content-disposition" not in response.headers
 
 
 def test_training_answers_cover_all_training_labels_and_are_valid_submissions(client):
@@ -85,7 +98,9 @@ def test_manifest_and_explorer_use_only_new_scopes(client):
         assert len(response["items"]) == 3
         assert all(row["paper_id"] in manifest["splits"][scope] for row in response["items"])
         pid = response["items"][0]["paper_id"]
-        assert "expressions" in client.get(f"/api/papers/{pid}").json()
+        detail = client.get(f"/api/papers/{pid}").json()
+        assert ("expressions" in detail) == (scope == "train")
+        assert all(("gold_count" in row) == (scope == "train") for row in response["items"])
     assert client.get("/api/papers?scope=all").status_code == 422
 
 
@@ -112,6 +127,95 @@ def test_evaluation_scope_rejects_training_papers_and_cannot_shrink_denominator(
     assert report["counts"]["gold"] == sum(len(dataset.labels[pid]) for pid in dataset.splits["evaluation"])
     assert report["split_version"] == "train-evaluation-v1"
     assert report["metrics"]["final_score"] == 0
+
+
+@pytest.mark.parametrize("query", ["", "?scope=train", "?scope=demo", "?scope=all"])
+def test_paper_detail_hides_evaluation_labels_based_on_server_membership(client, query):
+    dataset = client.app.state.dataset
+    # Include slash-containing IDs to cover path handling if present in this split.
+    ids = [dataset.splits["evaluation"][0]]
+    ids.extend(pid for pid in dataset.splits["evaluation"] if "/" in pid)
+    for pid in ids:
+        detail = client.get(f"/api/papers/{pid}{query}").json()
+        assert detail["paper_id"] == pid
+        assert detail["abstract"] == dataset.papers[pid]["abstract"]
+        assert detail["reference_hidden"] is True
+        assert "expressions" not in detail
+
+
+def assert_hidden(paper, dataset):
+    assert paper["reference_hidden"] is True
+    assert "gold_expressions" not in paper and "missing_expressions" not in paper
+    assert paper["gold_count"] == len(dataset.labels[paper["paper_id"]])
+
+
+def test_empty_submission_cannot_download_evaluation_answer_key(client):
+    dataset = client.app.state.dataset
+    response = client.post("/api/runs", headers=HEADERS, json={
+        "name": "empty evaluation", "scope": "evaluation", "predictions": [],
+    })
+    assert response.status_code == 201
+    run = response.json()
+    for endpoint in (None, f'/api/runs/{run["id"]}', f'/api/runs/{run["id"]}/export'):
+        report = run["report"] if endpoint is None else client.get(endpoint).json()["report"]
+        assert report["metrics"]["final_score"] == 0
+        for paper in report["papers"]:
+            assert_hidden(paper, dataset)
+            assert paper["missing_count"] == paper["gold_count"]
+    stored = client.app.state.store.get(run["id"])
+    assert all("gold_expressions" in paper for paper in stored["report"]["papers"])
+    assert "reference_hidden" not in stored["report"]["papers"][0]
+
+
+def test_evaluation_scoring_still_uses_private_reference_labels(client):
+    dataset = client.app.state.dataset
+    pid = next(pid for pid in dataset.splits["evaluation"] if dataset.labels[pid])
+    expression = dataset.labels[pid][0]["text"]
+    question = {"expression_text": expression, "options": [expression, "wrong one", "wrong two", "wrong three"], "answer_id": 0}
+    response = client.post("/api/runs", headers=HEADERS, json={
+        "name": "correct expression", "scope": "evaluation", "predictions": [{"paper_id": pid, "questions": [question]}],
+    })
+    assert response.status_code == 201
+    run = response.json()
+    report = run["report"]
+    assert report["counts"]["matched"] == 1
+    assert report["metrics"]["quality_matched_pct"] == 100
+    assert report["metrics"]["final_score"] == pytest.approx(100 / report["counts"]["gold"], abs=1e-6)
+    paper = next(paper for paper in report["papers"] if paper["paper_id"] == pid)
+    assert_hidden(paper, dataset)
+    assert paper["missing_count"] == paper["gold_count"] - 1
+    assert paper["items"][0]["expression_text"] == expression
+    assert paper["items"][0]["matched"] is True
+    exported = client.get(f'/api/runs/{run["id"]}/export').json()["report"]
+    assert exported == report
+
+
+def test_historical_mixed_scope_reads_and_review_responses_hide_only_evaluation_labels(client):
+    dataset = client.app.state.dataset
+    train_id = dataset.splits["demo"][0]
+    eval_id = next(pid for pid in dataset.splits["evaluation"] if dataset.labels[pid])
+    expression = dataset.labels[eval_id][0]["text"]
+    question = {"expression_text": expression, "options": [expression, "wrong one", "wrong two", "wrong three"], "answer_id": 0}
+    report = evaluate(dataset, [{"paper_id": eval_id, "questions": [question]}], [train_id, eval_id], "all")
+    stored = client.app.state.store.create("legacy mixed", report)
+    for suffix in ("", "/export"):
+        visible = client.get(f'/api/runs/{stored["id"]}{suffix}').json()["report"]
+        assert visible["papers"][0] == report["papers"][0]
+        assert_hidden(visible["papers"][1], dataset)
+    assert client.app.state.store.get(stored["id"]) == stored  # Read projection never rewrites storage.
+    skipped = client.post(f'/api/runs/{stored["id"]}/skip-judge', headers=HEADERS).json()
+    assert_hidden(skipped["report"]["papers"][1], dataset)
+    item = report["papers"][1]["items"][0]
+    reviewed = client.post(f'/api/runs/{stored["id"]}/reviews', headers=HEADERS, json={
+        "paper_id": eval_id, "question_id": item["question_id"], "accepted_option_ids": [item["answer_id"]],
+        "rubric": {"plausibility": 2, "learning_alignment": 2, "distinctness": 2, "no_cues": 2},
+        "gates": {"context_sufficient": True, "no_specialist_knowledge": True, "no_answer_leak": True},
+        "reviewer": "test", "rationale": "Mock legacy review for response privacy",
+    })
+    assert reviewed.status_code == 200, reviewed.text
+    assert_hidden(reviewed.json()["report"]["papers"][1], dataset)
+    assert reviewed.json()["report"]["metrics"]["final_score"] > 0
+    assert client.app.state.store.get(stored["id"])["report"]["papers"][1]["gold_expressions"] == report["papers"][1]["gold_expressions"]
 
 
 @pytest.mark.parametrize("path", ["all/papers", "custom/labels", "evaluation/unknown", "train/../../.env"])

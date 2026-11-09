@@ -29,7 +29,7 @@ from .judge import JudgeConfig, judge_item, quality_from_review, temporary_quali
 from .scoring import METRICS_VERSION, SubmissionError, evaluate, recompute
 from .storage import Store, now, report_status
 
-VERSION = "0.6.0"
+VERSION = "0.6.1"
 COOKIE = "paperlingo_session"
 
 
@@ -123,6 +123,7 @@ def create_app(settings: Settings | None = None):
     cfg = settings or Settings.from_env()
     cfg.validate()
     dataset = Dataset(cfg.data_dir)
+    evaluation_ids = frozenset(dataset.splits["evaluation"])
     store = Store(cfg.runtime_dir)
     jobs: dict[str, asyncio.Task] = {}
     all_tasks: set[asyncio.Task] = set()
@@ -131,6 +132,22 @@ def create_app(settings: Settings | None = None):
     login_attempts = defaultdict(deque)
     upload_attempts = defaultdict(deque)
     judge_health_cache = {"checked": 0.0, "value": None}
+
+    def public_run(run):
+        """Omit held-out reference text at every response boundary, not in storage.
+
+        Membership comes from the server split, including for historical mixed
+        scopes. Keep predictions, match feedback and counts for result analysis.
+        """
+        papers = []
+        for paper in run["report"]["papers"]:
+            if paper["paper_id"] in evaluation_ids:
+                paper = dict(paper)
+                paper["reference_hidden"] = True
+                paper["gold_count"] = len(paper.pop("gold_expressions", []))
+                paper["missing_count"] = len(paper.pop("missing_expressions", []))
+            papers.append(paper)
+        return {**run, "report": {**run["report"], "papers": papers}}
 
     @asynccontextmanager
     async def lifespan(app):
@@ -315,7 +332,10 @@ def create_app(settings: Settings | None = None):
                 continue
             if q and q not in f"{pid} {paper['paper_name']} {code}".casefold():
                 continue
-            rows.append({"paper_id": pid, "paper_name": paper["paper_name"], "domain": code, "gold_count": len(dataset.labels[pid])})
+            row = {"paper_id": pid, "paper_name": paper["paper_name"], "domain": code}
+            if pid not in evaluation_ids:
+                row["gold_count"] = len(dataset.labels[pid])
+            rows.append(row)
         offset, limit = max(offset, 0), max(1, min(limit, 100))
         return {"items": rows[offset:offset + limit], "total": len(rows), "scope": scope}
 
@@ -324,14 +344,19 @@ def create_app(settings: Settings | None = None):
         need_read(request)
         if paper_id not in dataset.papers:
             raise HTTPException(404, "논문을 찾을 수 없습니다.")
-        return {**dataset.papers[paper_id], "expressions": dataset.labels[paper_id]}
+        paper = dict(dataset.papers[paper_id])
+        if paper_id not in evaluation_ids:
+            paper["expressions"] = dataset.labels[paper_id]
+        else:
+            paper["reference_hidden"] = True
+        return paper
 
     @app.get("/api/datasets/{scope}/{kind}")
     def download_dataset(request: Request, scope: Literal["train", "evaluation"],
                          kind: Literal["papers", "labels", "answers"]):
         need_read(request)
-        if kind == "answers" and scope != "train":
-            raise HTTPException(404, "사지선다 예시답안은 학습 세트에만 제공합니다.")
+        if scope == "evaluation" and kind != "papers":
+            raise HTTPException(404, "평가 데이터는 논문 초록만 제공합니다. 선정 표현과 사지선다 예시답안은 비공개입니다.")
         paper_ids = dataset.splits[scope]
         if kind == "papers":
             fields = ("paper_id", "paper_name", "domain", "categories", "abstract")
@@ -425,12 +450,12 @@ def create_app(settings: Settings | None = None):
             run = store.create(body.name.strip(), report, predictions == dataset.demo_predictions(compact=True) or predictions == dataset.demo_predictions())
             if cfg.review_mode == "llm" and cfg.judge_configured:
                 enqueue_judge(run, automatic=True)
-            return run
+            return public_run(run)
 
     @app.get("/api/runs/{run_id}")
     def run_detail(run_id: str, request: Request):
         need_read(request)
-        return get_run(run_id)
+        return public_run(get_run(run_id))
 
     def pending_items(run):
         return [(p["paper_id"], copy.deepcopy(i)) for p in run["report"]["papers"] for i in p["items"]
@@ -583,7 +608,7 @@ def create_app(settings: Settings | None = None):
                 queued_task.cancel()
                 if jobs.get(run_id) is queued_task:
                     jobs.pop(run_id, None)
-            return run
+            return public_run(run)
 
     @app.post("/api/runs/{run_id}/reviews")
     async def review(run_id: str, body: dict, request: Request):
@@ -608,12 +633,13 @@ def create_app(settings: Settings | None = None):
             item["quality"] = quality
             recompute(run["report"])
             run["status"] = report_status(run["report"])
-            return store.save(run, {"paper_id": body["paper_id"], "question_id": body["question_id"], "previous_quality": previous, "quality": quality})
+            store.save(run, {"paper_id": body["paper_id"], "question_id": body["question_id"], "previous_quality": previous, "quality": quality})
+            return public_run(run)
 
     @app.get("/api/runs/{run_id}/export")
     def export(run_id: str, request: Request, format: Literal["json", "csv"] = "json"):
         need_read(request)
-        run = get_run(run_id)
+        run = public_run(get_run(run_id))
         if format == "json":
             run["review_history"] = store.review_history(run_id)
             return Response(json.dumps(run, ensure_ascii=False, indent=2), media_type="application/json", headers={"Content-Disposition": f'attachment; filename="paperlingo-{run_id}.json"'})

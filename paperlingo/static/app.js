@@ -25,6 +25,8 @@ function statusTag(status) { return tag(statusLabels[status] || status, status =
 function judgeActive(run) { return ["queued", "judging"].includes(run?.status); }
 function temporaryRun(run) { const report = run?.report || run; return run?.score_mode === "temporary" || report?.score_mode === "temporary" || Number(report?.counts?.quality_temporary || 0) > 0 || !!report?.papers?.some(paper => paper.items.some(item => item.quality?.source === "temporary")); }
 function codeRun(run) { const report = run?.report || run; return report?.quality_policy_version === "code-basic-v1"; }
+function referenceCount(paper) { return paper.reference_hidden ? paper.gold_count : (paper.gold_expressions || []).length; }
+function missingCount(paper) { return paper.reference_hidden ? paper.missing_count : (paper.missing_expressions || []).length; }
 function scoringRule(version) {
   if (version === "exact-rq-v3") return { version, label: "v3", formula: "100 × R × Qmatched", legacy: false };
   if (["exact-prq-v1", "exact-prq-v2"].includes(version)) return { version, label: version.endsWith("v1") ? "v1" : "v2", formula: "100 × P × R × Qmatched", legacy: true };
@@ -310,7 +312,7 @@ function renderPapers() {
   const papers = state.run.report.papers.filter(paper => {
     const searchMatch = !query || `${paper.paper_id} ${paper.paper_name} ${(paper.items || []).map(item => item.expression_text).join(" ")} ${(paper.gold_expressions || []).join(" ")}`.toLowerCase().includes(query);
     if (!searchMatch) return false;
-    if (filter === "missing") return !paper.submitted || paper.missing_expressions?.length;
+    if (filter === "missing") return !paper.submitted || missingCount(paper);
     if (filter !== "all") return paper.items.some(item => itemMatchesFilter(item, filter));
     return true;
   });
@@ -324,19 +326,24 @@ function renderPapers() {
     details.open = oldOpen.has(paper.paper_id) || (oldOpen.size === 0 && papers.length <= 3 && index === 0);
     const summary = node("summary"), copy = node("div", "paper-summary-copy");
     copy.append(node("div", "paper-summary-title", paper.paper_name || paper.paper_id));
-    const meta = node("div", "paper-summary-meta"); meta.append(node("span", "", paper.paper_id), node("span", "", displayDomain(paper.domain)), node("span", "", `생성 ${paper.items.length} / 참조 ${(paper.gold_expressions || []).length}`)); copy.append(meta);
+    const meta = node("div", "paper-summary-meta"); meta.append(node("span", "", paper.paper_id), node("span", "", displayDomain(paper.domain)), node("span", "", `생성 ${paper.items.length} / 참조 ${referenceCount(paper)}`)); copy.append(meta);
     const tags = node("div", "paper-summary-tags");
     if (!paper.submitted) tags.append(tag("제출 누락", "error"));
     else if (!paper.items.length) tags.append(tag("생성 표현 없음", "neutral"));
     else tags.append(tag(`${paper.items.filter(item => item.matched).length}개 일치`, "success"));
-    if (paper.missing_expressions?.length) tags.append(tag(`${paper.missing_expressions.length}개 미일치`, "warning"));
+    if (missingCount(paper)) tags.append(tag(`${missingCount(paper)}개 미일치`, "warning"));
     summary.append(copy, tags); details.append(summary);
     const body = node("div", "paper-body"), goldBlock = node("div", "gold-block");
-    goldBlock.append(node("div", "label-caption", "REFERENCE EXPRESSIONS · 참조 표현"));
-    const chips = node("div", "chip-list");
-    (paper.gold_expressions || []).forEach(expression => { const missing = (paper.missing_expressions || []).includes(expression); const chip = node("span", `expression-chip${missing ? " missing" : ""}`, expression); chip.title = missing ? "생성 결과와 일치하지 않은 참조 표현" : "생성 결과와 일치"; chips.append(chip); });
-    if (!paper.gold_expressions?.length) chips.append(node("span", "muted", "참조 표현 없음 · 명시적인 빈 출력을 확인합니다."));
-    goldBlock.append(chips); body.append(goldBlock);
+    if (paper.reference_hidden) {
+      goldBlock.append(node("div", "label-caption", "REFERENCE EXPRESSIONS · 비공개"), node("p", "muted", "평가용 선정 표현은 공개하지 않습니다. 제출한 표현의 일치 여부와 점수는 아래에서 확인할 수 있습니다."));
+    } else {
+      goldBlock.append(node("div", "label-caption", "REFERENCE EXPRESSIONS · 참조 표현"));
+      const chips = node("div", "chip-list");
+      (paper.gold_expressions || []).forEach(expression => { const missing = (paper.missing_expressions || []).includes(expression); const chip = node("span", `expression-chip${missing ? " missing" : ""}`, expression); chip.title = missing ? "생성 결과와 일치하지 않은 참조 표현" : "생성 결과와 일치"; chips.append(chip); });
+      if (!paper.gold_expressions?.length) chips.append(node("span", "muted", "참조 표현 없음 · 명시적인 빈 출력을 확인합니다."));
+      goldBlock.append(chips);
+    }
+    body.append(goldBlock);
     const source = node("details", "abstract-details"); source.append(node("summary", "", "논문 원문 확인"), node("div", "abstract-text", paper.abstract)); body.append(source);
     const visibleItems = paper.items.filter(item => itemMatchesFilter(item, filter));
     visibleItems.forEach(item => body.append(renderQuestion(paper, item)));
@@ -578,7 +585,7 @@ async function loadDataset() {
           const expressions = Array.isArray(full.expressions) ? full.expressions : null;
           if (expressions) body.append(node("div", "label-caption", "REFERENCE EXPRESSIONS"));
           if (expressions && !expressions.length) body.append(node("p", "muted", "선정된 참조 표현이 없습니다."));
-          if (!expressions) body.append(node("p", "muted", "이 데이터는 논문 초록을 제공합니다."));
+          if (!expressions) body.append(node("p", "muted", "평가용 선정 표현은 비공개입니다. 논문 초록으로 문항을 생성해 평가에 제출하세요."));
           (expressions || []).forEach(expression => {
             const entry = node("div", "label-entry");
             if (typeof expression === "string") entry.append(node("strong", "", expression));
