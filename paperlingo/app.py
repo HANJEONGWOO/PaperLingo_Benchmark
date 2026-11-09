@@ -29,7 +29,7 @@ from .judge import JudgeConfig, judge_item, quality_from_review, temporary_quali
 from .scoring import METRICS_VERSION, SubmissionError, evaluate, recompute
 from .storage import Store, now, report_status
 
-VERSION = "0.6.1"
+VERSION = "0.7.0"
 COOKIE = "paperlingo_session"
 
 
@@ -389,9 +389,9 @@ def create_app(settings: Settings | None = None):
         return {"scope": "demo", "paper_ids": dataset.splits["demo"], "predictions": predictions, "note": "참조 표현을 모두 담아 직접 작성한 형식 예제입니다. 형식 예제 세트에서 Precision·Recall·F1은 100%이며 보기 품질은 별도 평가합니다. 모델의 실측 성능이 아닙니다."}
 
     @app.get("/api/schema")
-    def schema(request: Request):
+    def schema(request: Request, lang: Literal["ko", "en"] = "ko"):
         need_read(request)
-        return {
+        definition = {
             "version": VERSION,
             "submission_format": "compact-v1",
             "input": "논문별 객체의 JSON 배열 또는 JSONL",
@@ -409,6 +409,17 @@ def create_app(settings: Settings | None = None):
             "legacy_supported": True,
             "sample": dataset.demo_predictions(compact=True)[0],
         }
+        if lang == "en":
+            definition["input"] = "A JSON array or JSONL of paper objects"
+            descriptions = {
+                "expression_text": "The entire learning expression from the source abstract",
+                "options": "Four distinct option strings",
+                "answer_id": "The answer index in the options array. 0 identifies the first option; strings and booleans are not allowed",
+            }
+            for field, description in descriptions.items():
+                definition["question_fields"][field]["description"] = description
+            definition["context_rule"] = "Use the first whole-word occurrence of expression_text in the source. Blank out the first whole-word occurrence of options[answer_id] within that expression and extract context containing the entire expression."
+        return definition
 
     @app.get("/api/runs")
     def runs(request: Request):

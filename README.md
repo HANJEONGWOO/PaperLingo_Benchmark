@@ -19,6 +19,8 @@
 
 기존 LLM·사람 검수 및 임시 만점 기록은 당시의 점수와 기준을 유지합니다. 새로운 코드 검사 점수는 같은 입력을 다시 제출해 확인하세요. 이전 기록의 사람 검수와 임시 처리 기능은 호환 목적으로 유지하되 새 코드 검사 결과를 덮어쓰지는 못합니다.
 
+상단의 **한국어 / English** 버튼으로 메뉴, 입력 안내, 결과와 검사 사유의 언어를 바꿀 수 있습니다. 선택은 해당 주소의 브라우저 `localStorage`에 저장해 새로고침하거나 다시 방문해도 유지합니다. 첫 방문에는 브라우저 언어를 따르며, 한국어 이외의 언어는 영어로 표시합니다. 전환 시 페이지를 다시 불러오지 않아 작성 중인 입력, 필터, 펼친 문항을 유지합니다. 같은 주소의 다른 탭에도 선택이 반영되며, 저장소 사용이 차단된 환경에서는 현재 탭의 전환만 지원합니다. 논문 원문, 제출한 보기·이름, 사람이 작성한 검수 의견과 다운로드 데이터는 원문을 유지합니다. 영어 필드 설명은 `/api/schema?lang=en`에서 확인할 수 있습니다.
+
 ## 설치 및 실행
 
 Python 3.12 이상에서:
@@ -198,6 +200,14 @@ Final     = 100 × Recall × Qmatched
 .venv/bin/python -m pytest -q
 ```
 
+언어 전환의 브라우저 검증은 Playwright와 Chromium이 있을 때 실행합니다. 입력 보존, 언어 저장·복원, 다른 탭과의 동기화, 검사 사유 번역 및 모바일 화면을 임시 서버·DB에서 확인합니다. 브라우저 의존성이 없으면 해당 검사는 건너뜁니다.
+
+```bash
+.venv/bin/python -m pip install -r requirements-ui.txt
+.venv/bin/python -m playwright install chromium
+.venv/bin/python -m pytest -q tests/test_ui_language.py
+```
+
 백업 시에는 서비스를 잠시 중지한 뒤 runtime 디렉터리 전체를 복사하거나 SQLite의 backup API를 사용합니다. 데이터셋·지표·검사 정책 버전과 평가 범위는 결과 JSON에 남습니다. LLM 모드에서는 모델명, 프롬프트 해시, 사용 토큰, 지연 시간과 검수 이력도 저장합니다. 코드 모드에서는 이전 LLM 작업을 자동 재개하지 않습니다. `llm` 모드에서 모델이 설정되어 있으면 서버 재시작 후 대기·중단된 작업을 자동 재개하며 이미 완료된 판정을 보존합니다. 이전 버전에서 검수를 기다리던 기록도 미완료 문항만 자동 처리합니다. 완료된 임시 만점 기록은 자동 재검수하지 않으며 사용자가 모델 검수를 선택할 때 대체합니다.
 
 주요 파일:
@@ -207,6 +217,7 @@ Final     = 100 × Recall × Qmatched
 - `paperlingo/code_review.py`: 네 가지 코드 검사와 통과·실패 판정
 - `paperlingo/judge.py`, `prompts/judge_v1.txt`: 블라인드 LLM 검수와 공통 rubric
 - `paperlingo/static/`: 웹 화면
+- `paperlingo/static/i18n.js`, `translations.js`: 언어 선택 저장, 화면 문구 연결 및 영어 번역
 - `scripts/example_generator.py`: 초록만 입력하는 예제 생성기
 - `scripts/local_judge_server.py`: 로컬 GPU 추론 서버
 - `tests/`: 채점, 평가기, API, 예외 처리 테스트

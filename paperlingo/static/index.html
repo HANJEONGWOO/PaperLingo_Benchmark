@@ -7,6 +7,8 @@
   <title>PaperLingo · 평가 워크스페이스</title>
   <link rel="preload" href="/static/fonts/NotoSansKR.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/static/styles.css">
+  <script src="/static/translations.js" defer></script>
+  <script src="/static/i18n.js" defer></script>
   <script src="/static/app.js" defer></script>
 </head>
 <body>
@@ -25,7 +27,7 @@
       <div class="sidebar-footer"><span id="access-label">연결 중</span><button id="auth-button" class="sidebar-auth" hidden>로그인</button><span class="version-label">PAPERLINGO / V1</span></div>
     </aside>
     <div class="workspace">
-      <header class="topbar"><div class="breadcrumb">워크스페이스 <span>/</span> <strong id="breadcrumb-current">모델 평가</strong></div><div class="topbar-meta"><span class="status-dot" id="connection-dot"></span><span id="connection-status">서버 연결 중</span><span class="topbar-divider"></span><span id="protocol-version">평가 프로토콜 v3</span></div></header>
+      <header class="topbar"><div class="breadcrumb">워크스페이스 <span>/</span> <strong id="breadcrumb-current">모델 평가</strong></div><div class="topbar-meta"><span class="status-dot" id="connection-dot"></span><span id="connection-status">서버 연결 중</span><span class="topbar-divider"></span><span id="protocol-version">평가 프로토콜 v3</span></div><div class="language-switch" role="group" aria-label="Language / 언어" data-i18n-skip><button type="button" data-language="ko" lang="ko" aria-pressed="true">한국어</button><button type="button" data-language="en" lang="en" aria-pressed="false">English</button></div></header>
       <main id="main" tabindex="-1">
         <div id="global-message" class="notice" role="status" hidden></div>
         <section id="page-evaluate" class="page">
