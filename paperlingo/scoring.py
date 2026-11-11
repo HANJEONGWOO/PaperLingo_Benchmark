@@ -17,7 +17,7 @@ from .submission import COMPACT_FIELDS, INFERENCE_POLICY, MAX_QUESTIONS_PER_PAPE
 
 METRICS_VERSION = "soft-rq-v4"
 # Partial credit compares word tokens at their positions in the source abstract.
-# Function-word weighting follows tests/soft_match.py; positions replace its lemmas.
+# Function words weigh less so a shared "of" or "the" alone is not a match.
 FUNCTION_WEIGHT = 0.3
 FUNCTION_WORDS = frozenset("""
 a an the this that these those such
