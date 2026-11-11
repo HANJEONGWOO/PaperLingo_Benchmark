@@ -43,6 +43,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+      - name: Set up Docker Compose
+        uses: docker/setup-compose-action@2fe291b7677a45ee1269ec56a42604c143505e7e # v1
+        with:
+          # Match the version used locally; runner defaults may lack initial_sync.
+          version: v5.1.4
       - run: docker compose config --quiet
       - run: docker compose up --build --detach --wait --wait-timeout 90
       - name: Score examples and retain results after recreation

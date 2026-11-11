@@ -58,6 +58,8 @@ GitHub에서 `master`를 대상으로 PR을 만듭니다. `.github/workflows/ci.
 - **Python and browser tests**: Python 3.12, 전체 pytest, Chromium을 이용한 실제 화면 검사.
 - **Container and persistence**: Docker 빌드·기동, 예제 100점 채점, 컨테이너 재생성 후 같은 평가 기록 조회.
 
+컨테이너 검사에서는 `docker/setup-compose-action`으로 Docker Compose **v5.1.4**를 설치합니다. GitHub 실행 환경의 기본 버전이 개발 설정의 `initial_sync`를 지원하지 않는 경우에도 같은 버전으로 검증합니다. `additional properties 'initial_sync' not allowed` 오류가 있는 과거 실행은 수정 커밋을 push한 뒤 새 실행에서 확인하세요.
+
 PR에서는 공용 서버 배포를 실행하지 않습니다. `master`에 push된 커밋에서 두 검사 모두 성공해야 배포 작업을 시작합니다. 기본 브랜치 이름을 바꾸면 workflow의 브랜치 필터·조건·`ls-remote` 대상도 함께 바꾸세요.
 
 저장소의 **Settings → Rules → Rulesets**에서 `master`를 대상으로 PR과 두 검사를 필수로 지정하면 동료들이 검사를 거쳐 병합하도록 강제할 수 있습니다. 이 저장소 설정은 YAML 파일을 추가하는 것만으로 활성화되지 않습니다.
