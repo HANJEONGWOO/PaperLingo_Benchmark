@@ -9,6 +9,8 @@ import json
 from pathlib import Path
 import re
 
+from .sentences import SENTENCE_POLICY_VERSION, sentence_count
+
 
 class DatasetError(ValueError):
     """A reference dataset fails the invariants required for scoring."""
@@ -46,7 +48,8 @@ def occurrences(abstract: str, text: str, *, whole_words: bool = False) -> list[
 class Dataset:
     """Load original JSONL files without modifying them or repairing labels."""
 
-    SPLIT_VERSION = "example-evaluation-v2"
+    SPLIT_VERSION = "evaluation-min5sentences-v3"
+    MIN_EVALUATION_SENTENCES = 5
     EXAMPLE_PAPER_IDS = ("0911.3369", "1109.3182", "1709.01217")
     EXAMPLE_ANSWER_VERSION = "authored-demo-v1"
 
@@ -178,11 +181,22 @@ class Dataset:
             if paper_id not in preferred:
                 preferred.append(paper_id)
         demo_ids = set(preferred)
-        # Keep only the public format examples outside evaluation. The demo
-        # scope ID stays stable for existing sample files and saved reports.
+        self.sentence_counts = {pid: sentence_count(paper["abstract"]) for pid, paper in self.papers.items()}
+        source_ids = sorted(set(self.papers) - demo_ids)
+        eligible_ids = [pid for pid in source_ids if self.sentence_counts[pid] >= self.MIN_EVALUATION_SENTENCES]
+        self.evaluation_filter = {
+            "minimum_sentences": self.MIN_EVALUATION_SENTENCES,
+            "sentence_policy_version": SENTENCE_POLICY_VERSION,
+            "source_paper_count": len(source_ids),
+            "eligible_paper_count": len(eligible_ids),
+            "excluded_paper_count": len(source_ids) - len(eligible_ids),
+            "sampling": "none; retain every eligible paper",
+        }
+        # Preserve the public examples. All qualifying papers in the previous
+        # evaluation pool remain, with no sample-size or domain restriction.
         self.splits: dict[str, list[str]] = {
             "demo": preferred,
-            "evaluation": sorted(set(self.papers) - demo_ids),
+            "evaluation": eligible_ids,
         }
 
     def example_answer_metadata(self) -> dict:
@@ -204,7 +218,16 @@ class Dataset:
             "zero_gold_count": sum(not expressions for expressions in self.labels.values()),
             "version": self.version,
             "split_version": self.SPLIT_VERSION,
+            "evaluation_filter": deepcopy(self.evaluation_filter),
             "splits": {key: len(ids) for key, ids in self.splits.items()},
+            "split_stats": {
+                scope: {
+                    "paper_count": len(ids),
+                    "expression_count": sum(len(self.labels[paper_id]) for paper_id in ids),
+                    "domain_count": len({domain_code(self.papers[paper_id]) for paper_id in ids}),
+                }
+                for scope, ids in self.splits.items()
+            },
             "audit": deepcopy(self.audit),
         }
 

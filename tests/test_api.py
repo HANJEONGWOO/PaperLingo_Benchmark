@@ -1,6 +1,8 @@
 import copy
+import hashlib
 import json
 from pathlib import Path
+import re
 import time
 
 from fastapi.testclient import TestClient
@@ -62,6 +64,9 @@ def test_dataset_and_sample_are_real(client):
     config = client.get("/api/config").json()
     assert config["dataset"]["paper_count"] == 1490
     assert config["dataset"]["expression_count"] == 6188
+    assert config["dataset"]["split_stats"]["evaluation"] == {
+        "paper_count": 1044, "expression_count": 4832, "domain_count": 147,
+    }
     assert config["judge"]["configured"] is False
     assert client.get("/api/papers?q=0911.3369").json()["total"] == 1
     assert client.get("/api/papers/0911.3369").json()["expressions"]
@@ -69,6 +74,25 @@ def test_dataset_and_sample_are_real(client):
     assert sample.status_code == 200
     assert "attachment" in sample.headers["content-disposition"]
     assert all("questions" in json.loads(line) for line in sample.text.splitlines())
+
+
+def test_homepage_versions_assets_and_requires_cache_revalidation(client):
+    page = client.get("/")
+    assert page.status_code == 200
+    assert page.headers["cache-control"] == "no-cache"
+    urls = re.findall(r'(?:src|href)="(/static/[^"?]+\.(?:js|css)\?v=[a-f0-9]+)"', page.text)
+    assert len(urls) == 4
+    for url in urls:
+        path, revision = url.split("?v=")
+        response = client.get(url)
+        assert response.status_code == 200
+        assert revision == hashlib.sha256(response.content).hexdigest()[:16]
+        assert response.headers["cache-control"] == "no-cache"
+        unchanged = client.get(url, headers={"If-None-Match": response.headers["etag"]})
+        assert unchanged.status_code == 304
+        assert unchanged.headers["cache-control"] == "no-cache"
+        assert client.get(path).headers["cache-control"] == "no-cache"
+    assert client.get("/api/config").headers["cache-control"] == "no-store"
 
 
 def test_downloaded_compact_sample_is_the_public_contract(client):
@@ -187,7 +211,7 @@ def test_missing_scope_is_not_inferred_from_submission(client):
     assert result.status_code == 201
     report = result.json()["report"]
     assert report["counts"]["gold"] == sum(len(dataset.labels[pid]) for pid in dataset.splits["evaluation"])
-    assert report["counts"]["missing_papers"] == 1486
+    assert report["counts"]["missing_papers"] == 1043
     assert report["metrics"]["coverage_pct"] < 1
 
 

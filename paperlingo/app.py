@@ -17,7 +17,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -29,7 +29,7 @@ from .judge import JudgeConfig, judge_item, quality_from_review, temporary_quali
 from .scoring import METRICS_VERSION, SubmissionError, evaluate, recompute
 from .storage import Store, now, report_status
 
-VERSION = "0.8.0"
+VERSION = "0.9.2"
 COOKIE = "paperlingo_session"
 
 
@@ -123,7 +123,7 @@ def create_app(settings: Settings | None = None):
     cfg = settings or Settings.from_env()
     cfg.validate()
     dataset = Dataset(cfg.data_dir)
-    evaluation_ids = frozenset(dataset.splits["evaluation"])
+    public_reference_ids = frozenset(dataset.splits["demo"])
     store = Store(cfg.runtime_dir)
     jobs: dict[str, asyncio.Task] = {}
     all_tasks: set[asyncio.Task] = set()
@@ -136,12 +136,13 @@ def create_app(settings: Settings | None = None):
     def public_run(run):
         """Omit held-out reference text at every response boundary, not in storage.
 
-        Membership comes from the server split, including for historical mixed
-        scopes. Keep predictions, match feedback and counts for result analysis.
+        Only public examples may expose reference text. Papers excluded by the
+        length filter stay private, including in historical mixed scopes. Keep
+        predictions, match feedback and counts for result analysis.
         """
         papers = []
         for paper in run["report"]["papers"]:
-            if paper["paper_id"] in evaluation_ids:
+            if paper["paper_id"] not in public_reference_ids:
                 paper = dict(paper)
                 paper["reference_hidden"] = True
                 paper["gold_count"] = len(paper.pop("gold_expressions", []))
@@ -240,6 +241,11 @@ def create_app(settings: Settings | None = None):
         response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
         if request.url.path.startswith("/api/"):
             response.headers["Cache-Control"] = "no-store"
+        elif request.url.path == "/" or (
+            request.url.path.startswith("/static/")
+            and Path(request.url.path).suffix in {".html", ".js", ".css"}
+        ):
+            response.headers["Cache-Control"] = "no-cache"
         return response
 
     @app.get("/api/health")
@@ -311,7 +317,9 @@ def create_app(settings: Settings | None = None):
     def splits(request: Request, download: bool = False):
         need_read(request)
         manifest = {"dataset_version": dataset.version, "split_version": dataset.SPLIT_VERSION,
-                    "splits": dataset.splits, "example_answers": dataset.example_answer_metadata()}
+                    "splits": dataset.splits, "example_answers": dataset.example_answer_metadata(),
+                    "evaluation_filter": dataset.evaluation_filter,
+                    "evaluation_sentence_counts": {pid: dataset.sentence_counts[pid] for pid in dataset.splits["evaluation"]}}
         if download:
             return Response(json.dumps(manifest, ensure_ascii=False, indent=2), media_type="application/json", headers={"Content-Disposition": 'attachment; filename="paperlingo-splits.json"'})
         return manifest
@@ -331,7 +339,7 @@ def create_app(settings: Settings | None = None):
             if q and q not in f"{pid} {paper['paper_name']} {code}".casefold():
                 continue
             row = {"paper_id": pid, "paper_name": paper["paper_name"], "domain": code}
-            if pid not in evaluation_ids:
+            if pid in public_reference_ids:
                 row["gold_count"] = len(dataset.labels[pid])
             rows.append(row)
         offset, limit = max(offset, 0), max(1, min(limit, 100))
@@ -343,7 +351,7 @@ def create_app(settings: Settings | None = None):
         if paper_id not in dataset.papers:
             raise HTTPException(404, "논문을 찾을 수 없습니다.")
         paper = dict(dataset.papers[paper_id])
-        if paper_id not in evaluation_ids:
+        if paper_id in public_reference_ids:
             paper["expressions"] = dataset.labels[paper_id]
         else:
             paper["reference_hidden"] = True
@@ -665,9 +673,14 @@ def create_app(settings: Settings | None = None):
     static = Path(__file__).parent / "static"
     static.mkdir(exist_ok=True)
     app.mount("/static", StaticFiles(directory=static), name="static")
+    index_html = (static / "index.html").read_text(encoding="utf-8")
+    for filename in ("styles.css", "translations.js", "i18n.js", "app.js"):
+        revision = hashlib.sha256((static / filename).read_bytes()).hexdigest()[:16]
+        asset_url = f"/static/{filename}"
+        index_html = index_html.replace(f'"{asset_url}"', f'"{asset_url}?v={revision}"')
 
     @app.get("/")
     def index():
-        return FileResponse(static / "index.html")
+        return HTMLResponse(index_html)
 
     return app

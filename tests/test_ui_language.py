@@ -69,6 +69,32 @@ def language(page, code):
     pw.expect(page.locator(f'[data-language="{code}"]')).to_have_attribute("aria-pressed", "true")
 
 
+def test_updated_page_bypasses_old_unversioned_script(browser, web_url):
+    """Simulate an old asset response at the URL used before versioning."""
+    static = Path(__file__).resolve().parents[1] / "paperlingo" / "static"
+    old_script = (static / "app.js").read_text().replace(
+        "const evaluationStats = summary.split_stats.evaluation;",
+        "const evaluationStats = summary;",
+    )
+    with browser.new_context(locale="ko-KR") as context:
+        page = context.new_page()
+        context.route(web_url + "/static/app.js", lambda route: route.fulfill(
+            body=old_script, content_type="application/javascript",
+        ))
+        page.route(web_url + "/", lambda route: route.fulfill(
+            body=(static / "index.html").read_text(), content_type="text/html",
+        ))
+        page.goto(web_url, wait_until="networkidle")
+        pw.expect(page.locator("#stat-papers")).to_have_text("1,490")
+        language(page, "en")
+        page.unroute(web_url + "/")
+        page.reload(wait_until="networkidle")
+        pw.expect(page.locator("#stat-papers")).to_have_text("1,044")
+        pw.expect(page.locator("#stat-expressions")).to_have_text("4,832")
+        pw.expect(page.locator("#stat-domains")).to_have_text("147")
+        pw.expect(page.locator("html")).to_have_attribute("lang", "en")
+
+
 def test_saved_choice_and_cross_tab_changes_do_not_reload_or_reset_inputs(page, web_url):
     pw.expect(page.locator("html")).to_have_attribute("lang", "en")
     page.locator("#run-name").fill("모델 평가")  # Must not be mistaken for a UI translation key.
@@ -144,12 +170,27 @@ def test_validation_messages_translate_in_place(page):
 
 
 def test_data_guide_and_mobile_layout_keep_evaluation_downloads_disabled(page):
+    for code, labels in (
+        ("en", ["Evaluation papers", "Evaluation expressions", "Evaluation domains"]),
+        ("ko", ["평가 논문", "평가 참조 표현", "평가 연구 분야"]),
+    ):
+        language(page, code)
+        pw.expect(page.locator("#stat-papers")).to_have_text("1,044")
+        pw.expect(page.locator("#stat-expressions")).to_have_text("4,832")
+        pw.expect(page.locator("#stat-domains")).to_have_text("147")
+        pw.expect(page.locator(".dataset-strip > div > span").nth(0)).to_have_text(labels[0])
+        pw.expect(page.locator(".dataset-strip > div > span").nth(1)).to_have_text(labels[1])
+        pw.expect(page.locator(".dataset-strip > div > span").nth(2)).to_have_text(labels[2])
+        for width in (320, 1440):
+            page.set_viewport_size({"width": width, "height": 1000})
+            assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+    language(page, "en")
     page.locator('[data-page="dataset"]').click()
-    pw.expect(page.locator("#dataset-size-evaluation")).to_have_text("1,487")
+    pw.expect(page.locator("#dataset-size-evaluation")).to_have_text("1,044")
     pw.expect(page.locator("#evaluation-label-download")).to_have_text("Selected expressions ↓")
     pw.expect(page.locator("#evaluation-answer-download")).to_be_disabled()
     page.locator("#dataset-scope").select_option("evaluation")
-    pw.expect(page.locator("#dataset-count")).to_have_text("Evaluation · 1,487 papers")
+    pw.expect(page.locator("#dataset-count")).to_have_text("Evaluation · 1,044 papers")
     page.locator("#dataset-list summary").first.click()
     pw.expect(page.locator("#dataset-list .dataset-paper-body").first).to_contain_text("Evaluation reference expressions are private.")
     original = page.locator("#dataset-list .abstract-text").first.inner_text()
@@ -185,7 +226,7 @@ def test_switching_during_a_request_restores_translated_button_text(page):
 def test_example_downloads_and_submission_score_full_marks_in_both_languages(page, tmp_path):
     page.locator('[data-page="dataset"]').click()
     pw.expect(page.locator("#dataset-size-demo")).to_have_text("3")
-    pw.expect(page.locator("#dataset-size-evaluation")).to_have_text("1,487")
+    pw.expect(page.locator("#dataset-size-evaluation")).to_have_text("1,044")
     assert page.locator("#dataset-scope option").evaluate_all("els => els.map(el => el.value)") == ["demo", "evaluation"]
     assert page.locator("#scope option").evaluate_all("els => els.map(el => el.value)") == ["demo", "evaluation"]
     downloads = {}

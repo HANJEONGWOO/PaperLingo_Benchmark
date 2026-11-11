@@ -275,6 +275,10 @@ window.PaperLingoEnglish = {
   "생성 결과를 업로드하면 표현 일치도와 보기의 네 가지 기본 조건을 즉시 검사합니다.": "Upload generated questions to check expression matches and four basic option requirements instantly.",
   "참조 라벨 v2": "Reference labels v2",
   "참조 데이터 현황": "Reference dataset overview",
+  "평가 데이터 현황": "Evaluation dataset overview",
+  "평가 논문": "Evaluation papers",
+  "평가 참조 표현": "Evaluation expressions",
+  "평가 연구 분야": "Evaluation domains",
   "논문 초록": "Paper abstracts",
   "참조 표현": "Reference expressions",
   "연구 분야": "Research domains",
@@ -339,7 +343,6 @@ window.PaperLingoEnglish = {
   "선정 표현 ↓": "Selected expressions ↓",
   "사지선다 예시답안 ↓": "Example answers ↓",
   "평가 데이터": "Evaluation data",
-  "준비된 모델의 성능을 확인할 평가용 논문 초록을 제공합니다. 선정 표현과 예시답안은 공개하지 않습니다.": "Provides abstracts for evaluating your model. Selected expressions and example answers are private.",
   "평가 정답 노출을 방지하기 위해 두 다운로드는 비활성화되어 있습니다. 모델과 프롬프트를 고정한 뒤 초록으로 문항을 생성하고, 평가 범위를 선택해 제출하세요.": "These two downloads are disabled to prevent answer leakage. Freeze your model and prompt, generate questions from the abstracts, then submit using the evaluation scope.",
   "내려받은 논문으로 학습 표현과 사지선다 보기를 생성한 뒤, 같은 데이터 범위를 선택해 결과를 제출하세요.": "Generate expressions and multiple-choice questions from the downloaded papers, then submit using the corresponding dataset scope.",
   "분할 정보 내려받기 ↓": "Download split manifest ↓",
@@ -540,9 +543,10 @@ window.PaperLingoEnglish = {
   "예시 데이터": "Example data",
   "학습 (이전 범위)": "Training (legacy scope)",
   "예시·평가 데이터 내려받기 →": "Download example and evaluation data →",
-  "예시 데이터로 입력 형식을 확인하고, 나머지 논문으로 모델을 평가하세요.": "Use the example data to check the input format, then evaluate your model on the remaining papers.",
-  "예시 3편 · 나머지 전체 평가": "3 example papers · All others for evaluation",
   "논문 3편의 초록, 선정 표현 정답, 사지선다 예시답안을 함께 제공합니다. 예시답안을 예시 데이터 범위로 제출하면 현재 코드 검사 기준으로 100점입니다.": "Download abstracts, selected expressions and example answers for three papers. Submit the answers under Example data to score 100 with the current code checks.",
   "모두 JSONL 파일입니다. 예시답안은 참조 표현 9개를 모두 포함하며 네 가지 코드 검사를 통과합니다. 의미적 정답성과 오답의 교육적 품질은 별도 검토가 필요합니다.": "All files use JSONL. The example answers cover all nine reference expressions and pass all four code checks. Semantic correctness and educational quality of distractors still require separate review.",
-  "공개 예시 3편을 제외한 모든 논문을 평가 데이터로 사용": "Use all papers except the three public examples for evaluation"
+  "예시 데이터로 입력 형식을 확인하고, 초록이 5문장 이상인 논문으로 모델을 평가하세요.": "Use the example data to check the input format, then evaluate your model on papers with abstracts of at least five sentences.",
+  "예시 3편 · 초록 5문장 이상 평가": "3 example papers · Evaluation: 5+ sentences",
+  "기존 평가 논문 중 초록이 5문장 이상인 논문을 모두 제공합니다. 선정 표현과 예시답안은 공개하지 않습니다.": "Includes every paper from the previous evaluation set whose abstract has at least five sentences. Selected expressions and example answers remain private.",
+  "공개 예시 3편을 제외하고 초록이 5문장 이상인 모든 논문으로 평가": "Evaluate all papers with abstracts of at least five sentences, excluding the three public examples"
 };

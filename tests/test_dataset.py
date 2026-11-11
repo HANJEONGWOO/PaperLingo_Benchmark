@@ -20,19 +20,31 @@ def test_real_reference_integrity_and_splits():
     assert summary["expression_count"] == 6188
     assert summary["domain_count"] == 149
     assert summary["zero_gold_count"] == 12
-    assert summary["splits"] == {"demo": 3, "evaluation": 1487}
-    assert summary["split_version"] == Dataset.SPLIT_VERSION == "example-evaluation-v2"
+    assert summary["splits"] == {"demo": 3, "evaluation": 1044}
+    assert summary["split_stats"] == {
+        "demo": {"paper_count": 3, "expression_count": 9, "domain_count": 2},
+        "evaluation": {"paper_count": 1044, "expression_count": 4832, "domain_count": 147},
+    }
+    assert summary["split_version"] == Dataset.SPLIT_VERSION == "evaluation-min5sentences-v3"
     assert len(dataset.version) == 64
     assert summary["audit"]["word_boundary_flag_count"] == 0
     assert summary["audit"]["duplicate_abstract_groups"] == []
     partitions = [set(dataset.splits[name]) for name in ("demo", "evaluation")]
-    assert set.union(*partitions) == set(dataset.papers)
+    excluded = set(dataset.papers) - set.union(*partitions)
+    assert len(excluded) == 443
+    assert all(dataset.sentence_counts[pid] < 5 for pid in excluded)
+    assert partitions[1] == {pid for pid in dataset.papers if pid not in partitions[0] and dataset.sentence_counts[pid] >= 5}
     assert not partitions[0] & partitions[1]
-    assert [len(partition) for partition in partitions] == [3, 1487]
+    assert [len(partition) for partition in partitions] == [3, 1044]
     assert dataset.splits["demo"] == ["0911.3369", "1109.3182", "1709.01217"]
     assert set(dataset.splits["demo"]) <= partitions[0]
     assert not set(dataset.splits["demo"]) & partitions[1]
-    assert sum(len(dataset.labels[pid]) for pid in dataset.splits["evaluation"]) == 6179
+    assert sum(len(dataset.labels[pid]) for pid in dataset.splits["evaluation"]) == 4832
+    assert summary["evaluation_filter"] == {
+        "minimum_sentences": 5, "sentence_policy_version": "abstract-sentences-v1",
+        "source_paper_count": 1487, "eligible_paper_count": 1044, "excluded_paper_count": 443,
+        "sampling": "none; retain every eligible paper",
+    }
     assert dataset.splits == Dataset(DATA_DIR).splits
     assert dataset.version == Dataset(DATA_DIR).version
     assert before == {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in DATA_DIR.glob("*.jsonl")}
@@ -168,8 +180,8 @@ def test_splits_ignore_source_row_order_and_preserve_references(tmp_path):
     reordered = Dataset(tmp_path)
     assert reordered.splits == original.splits
     assert len(reordered.splits["demo"]) == 3
-    assert len(reordered.splits["evaluation"]) == 17
-    assert set(reordered.splits["demo"]) | set(reordered.splits["evaluation"]) == set(reordered.papers)
+    assert reordered.splits["evaluation"] == []  # Every synthetic abstract has one sentence.
+    assert reordered.evaluation_filter["excluded_paper_count"] == 17
 
 
 def test_tiny_dataset_keeps_public_examples_out_of_evaluation(tmp_path):

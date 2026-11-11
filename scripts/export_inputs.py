@@ -23,7 +23,8 @@ def main():
             record = {key: paper[key] for key in ("paper_id", "paper_name", "domain", "abstract")}
             stream.write(json.dumps(record, ensure_ascii=False) + "\n")
     manifest = {"scope": args.scope, "paper_ids": dataset.splits[args.scope], "dataset_version": dataset.version,
-                "split_version": dataset.SPLIT_VERSION}
+                "split_version": dataset.SPLIT_VERSION, "evaluation_filter": dataset.evaluation_filter,
+                "sentence_counts": {pid: dataset.sentence_counts[pid] for pid in dataset.splits[args.scope]}}
     args.output.with_suffix(args.output.suffix + ".manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"Exported {len(manifest['paper_ids'])} abstracts (no labels) to {args.output}")
 

@@ -139,9 +139,10 @@ async function initialize() {
     if (state.config.metrics_version) I18n.setText($("#protocol-version"), () => msg("평가 프로토콜 {0}", scoringRule(state.config.metrics_version).label));
     state.judgeStatus = { configured: !!state.config.judge?.configured, ready: false, message: msg("평가 모델의 연결 상태를 확인 중입니다.") };
     const summary = state.config.dataset;
-    I18n.setText($("#stat-papers"), () => number(summary.paper_count));
-    I18n.setText($("#stat-expressions"), () => number(summary.expression_count));
-    I18n.setText($("#stat-domains"), () => number(summary.domain_count));
+    const evaluationStats = summary.split_stats.evaluation;
+    I18n.setText($("#stat-papers"), () => number(evaluationStats.paper_count));
+    I18n.setText($("#stat-expressions"), () => number(evaluationStats.expression_count));
+    I18n.setText($("#stat-domains"), () => number(evaluationStats.domain_count));
     ["demo", "evaluation"].forEach(scope => {
       const value = summary.splits?.[scope];
       I18n.setText($("#dataset-size-" + scope), () => value === undefined ? "—" : number(Array.isArray(value) ? value.length : value));

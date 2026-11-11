@@ -47,5 +47,6 @@
 .language-switch button:focus-visible{outline:2px solid var(--teal);outline-offset:2px}
 html[lang="en"] .metric-label{line-height:1.5;min-height:3em}
 html[lang="en"] .question-ident,html[lang="en"] .tag{overflow-wrap:anywhere}
+@media(max-width:640px){.dataset-strip{grid-template-columns:repeat(2,minmax(0,1fr));row-gap:20px}.dataset-strip>div:nth-child(2){border-right:0}}
 @media(max-width:1150px){.topbar-meta{display:none}.language-switch{margin-left:auto}}
 @media(max-width:640px){.topbar{gap:8px;padding-top:9px;padding-bottom:9px;min-height:56px}.breadcrumb{font-size:10px;min-width:0}.language-switch button{font-size:11px;padding:5px 8px}html[lang="en"] .nav-item{font-size:11px;padding:10px 7px;white-space:normal;text-align:center;line-height:1.4}html[lang="en"] .metric-label{min-height:0}}

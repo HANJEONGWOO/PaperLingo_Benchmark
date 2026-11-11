@@ -25,11 +25,11 @@ def read_download(client, scope, kind):
     assert response.headers["content-type"].startswith("application/x-ndjson")
     assert "attachment" in response.headers["content-disposition"]
     assert response.headers["x-dataset-version"] == client.app.state.dataset.version
-    assert response.headers["x-split-version"] == "example-evaluation-v2"
+    assert response.headers["x-split-version"] == "evaluation-min5sentences-v3"
     return [json.loads(line) for line in response.text.splitlines()]
 
 
-@pytest.mark.parametrize("scope, count", [("demo", 3), ("evaluation", 1487)])
+@pytest.mark.parametrize("scope, count", [("demo", 3), ("evaluation", 1044)])
 def test_papers_are_complete_source_subsets_without_labels(client, scope, count):
     dataset = client.app.state.dataset
     papers = read_download(client, scope, "papers")
@@ -87,15 +87,19 @@ def test_example_answers_cover_all_example_labels_and_are_valid_submissions(clie
 
 def test_manifest_and_explorer_use_only_new_scopes(client):
     manifest = client.get("/api/splits?download=1").json()
-    assert manifest["split_version"] == "example-evaluation-v2"
+    assert manifest["split_version"] == "evaluation-min5sentences-v3"
     assert manifest["example_answers"]["quality_status"] == "code-checked"
     assert manifest["example_answers"]["semantic_reviewed"] is False
+    assert manifest["evaluation_filter"]["minimum_sentences"] == 5
+    assert manifest["evaluation_filter"]["excluded_paper_count"] == 443
+    assert set(manifest["evaluation_sentence_counts"]) == set(manifest["splits"]["evaluation"])
+    assert all(count >= 5 for count in manifest["evaluation_sentence_counts"].values())
     assert client.get("/api/schema").json()["scopes"] == ["demo", "evaluation"]
     assert set(manifest["splits"]) == {"demo", "evaluation"}
     assert len(manifest["splits"]["demo"]) == 3
     assert not set(manifest["splits"]["demo"]) & set(manifest["splits"]["evaluation"])
     assert client.get("/api/papers").json()["total"] == 3
-    for scope, count in (("demo", 3), ("evaluation", 1487)):
+    for scope, count in (("demo", 3), ("evaluation", 1044)):
         response = client.get("/api/papers", params={"scope": scope, "limit": 100, "offset": count - 3}).json()
         assert response["total"] == count
         assert len(response["items"]) == 3
@@ -125,6 +129,33 @@ def test_former_training_paper_is_now_private_evaluation_data(client):
         assert "expressions" not in detail
 
 
+def test_short_abstract_is_excluded_but_its_references_remain_private(client):
+    dataset = client.app.state.dataset
+    paper_id = "math/0404367"
+    assert paper_id not in dataset.splits["evaluation"]
+    assert paper_id not in dataset.splits["demo"]
+    for query in ("", "?scope=demo", "?scope=evaluation"):
+        detail = client.get(f"/api/papers/{paper_id}{query}").json()
+        assert detail["reference_hidden"] is True
+        assert "expressions" not in detail
+    response = client.post("/api/runs", headers=HEADERS, json={
+        "name": "excluded short abstract", "scope": "evaluation",
+        "predictions": [{"paper_id": paper_id, "questions": []}],
+    })
+    assert response.status_code == 422
+    assert client.get("/api/runs").json()["items"] == []
+    report = evaluate(dataset, [], [paper_id], "evaluation")
+    report["split_version"] = "example-evaluation-v2"
+    stored = client.app.state.store.create("older evaluation", report)
+    for suffix in ("", "/export"):
+        visible = client.get(f'/api/runs/{stored["id"]}{suffix}').json()["report"]
+        assert_hidden(visible["papers"][0], dataset)
+        assert visible["metrics"] == report["metrics"]
+        assert visible["scope"] == report["scope"]
+        assert visible["split_version"] == "example-evaluation-v2"
+    assert client.app.state.store.get(stored["id"]) == stored
+
+
 @pytest.mark.parametrize("scope", ["train", "development", "validation", "test", "all", "custom"])
 def test_retired_scopes_cannot_create_new_runs(client, scope):
     response = client.post("/api/runs", headers=HEADERS, json={"name": "old scope", "scope": scope, "predictions": []})
@@ -144,9 +175,9 @@ def test_evaluation_scope_rejects_example_papers_and_cannot_shrink_denominator(c
     result = client.post("/api/runs", headers=HEADERS, json=body)
     assert result.status_code == 201, result.text
     report = result.json()["report"]
-    assert report["scope"]["paper_count"] == report["counts"]["missing_papers"] == 1487
+    assert report["scope"]["paper_count"] == report["counts"]["missing_papers"] == 1044
     assert report["counts"]["gold"] == sum(len(dataset.labels[pid]) for pid in dataset.splits["evaluation"])
-    assert report["split_version"] == "example-evaluation-v2"
+    assert report["split_version"] == "evaluation-min5sentences-v3"
     assert report["metrics"]["final_score"] == 0
 
 
