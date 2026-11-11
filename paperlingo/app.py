@@ -29,7 +29,7 @@ from .judge import JudgeConfig, judge_item, quality_from_review, temporary_quali
 from .scoring import METRICS_VERSION, SubmissionError, evaluate, recompute
 from .storage import Store, now, report_status
 
-VERSION = "0.10.0"
+VERSION = "0.12.0"
 COOKIE = "paperlingo_session"
 
 

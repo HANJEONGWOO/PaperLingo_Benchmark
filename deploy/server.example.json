@@ -1,0 +1,7 @@
+{
+  "release_dir": "~/.local/share/paperlingo-deploy",
+  "env_file": "~/git/PaperLingo_Benchmark/.env",
+  "runtime_dir": "~/git/PaperLingo_Benchmark/runtime",
+  "service": "paperlingo-web.service",
+  "health_url": "http://127.0.0.1:4173/api/health"
+}

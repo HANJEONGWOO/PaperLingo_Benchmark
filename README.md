@@ -23,7 +23,19 @@
 
 ## 설치 및 실행
 
-Python 3.12 이상에서:
+동료가 개발 서버를 실행할 때는 Docker를 사용할 수 있습니다. Docker Compose 2.32.0 이상에서:
+
+```bash
+git clone https://github.com/HANJEONGWOO/PaperLingo_Benchmark.git
+cd PaperLingo_Benchmark
+docker compose up --build --watch
+```
+
+`http://localhost:4173`에 접속합니다. Python·화면 파일을 저장하면 서버가 자동 재시작하며 브라우저를 새로고침하면 반영됩니다. 각 개발 서버의 평가 기록은 별도 Docker 볼륨에 저장됩니다. GPU, API 키, `.env` 복사는 필요하지 않습니다. 이 PC처럼 이미 4173 포트를 사용 중이면 `PAPERLINGO_DEV_PORT=4174 docker compose up --build --watch`로 실행합니다.
+
+PR 테스트, 공용 서버 자동 배포 설정과 복구 방법은 [협업·배포 안내](docs/collaboration.md)를 참고하세요. 자동 배포는 Runner 등록과 저장소 변수 설정을 마친 뒤 활성화됩니다.
+
+Docker 없이 직접 실행하려면 Python 3.12 이상에서:
 
 ```bash
 python3 -m venv .venv
@@ -42,7 +54,7 @@ systemctl --user restart paperlingo-web
 journalctl --user -u paperlingo-web -n 80 --no-pager
 ```
 
-설정이나 Python·HTML·CSS·JS 코드를 수정하면 웹 서비스를 다시 시작한 뒤 브라우저를 새로고침합니다. 현재 작업 큐는 단일 프로세스를 기준으로 하므로 Uvicorn worker는 **1개**로 실행합니다.
+수동 설치에서는 설정이나 Python·HTML·CSS·JS 코드를 수정하면 웹 서비스를 다시 시작한 뒤 브라우저를 새로고침합니다. 자동 배포 활성화 후에는 `master`에 반영된 커밋의 테스트가 모두 통과하면 별도 릴리스 폴더에서 준비한 코드로 서비스가 전환됩니다. 현재 작업 큐는 단일 프로세스를 기준으로 하므로 Uvicorn worker는 **1개**로 실행합니다.
 
 로컬 모델 실행 방법과 GPU 환경은 [로컬 추론 서버 안내](docs/README-local-runtime.md)를 확인하세요. `JUDGE_BASE_URL`, `JUDGE_MODEL`을 변경하면 다른 OpenAI 호환 로컬 서버도 연결할 수 있습니다. `JUDGE_API_KEY`는 인증이 필요한 서버를 사용할 때만 설정하며 브라우저에 전송되지 않습니다.
 

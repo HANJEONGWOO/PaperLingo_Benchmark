@@ -1,0 +1,89 @@
+name: Test and deploy
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: paperlingo-${{ github.workflow }}-${{ github.ref }}
+  # Never cancel a running production switch halfway through.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  tests:
+    name: Python and browser tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - run: python -m pip install -r requirements-ui.txt
+      - run: python -m playwright install --with-deps chromium
+      - run: python -m pytest -q
+
+  container:
+    name: Container and persistence
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      COMPOSE_PROJECT_NAME: paperlingo-ci
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - run: docker compose config --quiet
+      - run: docker compose up --build --detach --wait --wait-timeout 90
+      - name: Score examples and retain results after recreation
+        run: |
+          run_id=$(python3 scripts/smoke_web.py)
+          docker compose up --detach --force-recreate --wait --wait-timeout 90
+          python3 scripts/smoke_web.py --run-id "$run_id"
+      - if: failure()
+        run: docker compose logs --no-color --tail 100
+      - if: always()
+        run: docker compose down --volumes
+
+  deploy:
+    name: Deploy shared server
+    needs: [tests, container]
+    if: >-
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/master' &&
+      github.repository == 'HANJEONGWOO/PaperLingo_Benchmark' &&
+      vars.PAPERLINGO_AUTO_DEPLOY == 'true'
+    runs-on: [self-hosted, Linux, X64, paperlingo-deploy]
+    timeout-minutes: 20
+    environment:
+      name: production
+      url: http://hjw.iptime.org:4173
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Deploy the tested commit if it is still master
+        env:
+          TESTED_SHA: ${{ github.sha }}
+        run: |
+          latest=$(git ls-remote origin refs/heads/master | cut -f1)
+          if [ -z "$latest" ]; then
+            echo 'Cannot determine the current master revision.' >&2
+            exit 1
+          fi
+          if [ "$latest" != "$TESTED_SHA" ]; then
+            echo 'A newer commit is on master; this deployment is skipped.'
+            exit 0
+          fi
+          python3 scripts/deploy_release.py --revision "$TESTED_SHA"

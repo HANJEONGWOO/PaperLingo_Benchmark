@@ -1,0 +1,16 @@
+# Only application files and the required reference data enter the build context.
+**
+!Dockerfile
+!requirements.txt
+!paperlingo/
+!paperlingo/**
+!prompts/
+!prompts/**
+!data/
+!data/abstract_data.jsonl
+!data/abstract_labels_v2.jsonl
+!data/labeling_prompt_v2.md
+**/__pycache__/
+**/*.pyc
+**/.env*
+**/*.sqlite3*

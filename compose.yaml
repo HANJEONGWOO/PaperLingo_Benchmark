@@ -1,0 +1,49 @@
+# Docker Compose >= 2.32.0. Each project has its own evaluation history.
+services:
+  web:
+    build: .
+    ports:
+      - "127.0.0.1:${PAPERLINGO_DEV_PORT:-4173}:4173"
+    environment:
+      PAPERLINGO_HOST: 0.0.0.0
+      PAPERLINGO_PORT: "4173"
+      PAPERLINGO_PUBLIC_ACCESS: "true"
+      PAPERLINGO_PASSWORD: ""
+      PAPERLINGO_ALLOWED_HOSTS: localhost,127.0.0.1,[::1]
+      PAPERLINGO_RUNTIME_DIR: /app/runtime
+      PAPERLINGO_REVIEW_MODE: code
+    volumes:
+      - dev-runtime:/app/runtime
+    init: true
+    develop:
+      watch:
+        - action: sync+restart
+          path: ./paperlingo
+          target: /app/paperlingo
+          initial_sync: true
+          ignore:
+            - __pycache__/
+            - "*.pyc"
+        - action: sync+restart
+          path: ./prompts
+          target: /app/prompts
+          initial_sync: true
+        - action: sync+restart
+          path: ./data/abstract_data.jsonl
+          target: /app/data/abstract_data.jsonl
+          initial_sync: true
+        - action: sync+restart
+          path: ./data/abstract_labels_v2.jsonl
+          target: /app/data/abstract_labels_v2.jsonl
+          initial_sync: true
+        - action: sync+restart
+          path: ./data/labeling_prompt_v2.md
+          target: /app/data/labeling_prompt_v2.md
+          initial_sync: true
+        - action: rebuild
+          path: ./requirements.txt
+        - action: rebuild
+          path: ./Dockerfile
+
+volumes:
+  dev-runtime:
