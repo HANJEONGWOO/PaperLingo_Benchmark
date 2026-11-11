@@ -29,7 +29,7 @@ from .judge import JudgeConfig, judge_item, quality_from_review, temporary_quali
 from .scoring import METRICS_VERSION, SubmissionError, evaluate, recompute
 from .storage import Store, now, report_status
 
-VERSION = "0.9.2"
+VERSION = "0.10.0"
 COOKIE = "paperlingo_session"
 
 
@@ -76,7 +76,7 @@ class LoginInput(BaseModel):
 class RunInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=1, max_length=120)
-    scope: Literal["demo", "evaluation"]
+    scope: Literal["demo", "evaluation"] | None = None
     paper_ids: list[str] | None = None
     predictions: str | list[dict[str, Any]]
 
@@ -401,6 +401,8 @@ def create_app(settings: Settings | None = None):
             "input": "논문별 객체의 JSON 배열 또는 JSONL",
             "max_questions_per_paper": 5,
             "scopes": ["demo", "evaluation"],
+            "scope_optional": True,
+            "scope_selection": "automatic_when_omitted",
             "required_paper_fields": ["paper_id", "questions"],
             "required_question_fields": ["expression_text", "options", "answer_id"],
             "question_fields": {
@@ -445,13 +447,22 @@ def create_app(settings: Settings | None = None):
         predictions = parse_predictions(body.predictions)
         if not body.name.strip():
             raise HTTPException(422, "평가 이름을 입력하세요.")
-        paper_ids = dataset.splits[body.scope]
+        scope = body.scope
+        if scope is None:
+            submitted_ids = [prediction.get("paper_id") for prediction in predictions]
+            valid_ids = {pid for pid in submitted_ids if isinstance(pid, str)}
+            if valid_ids & public_reference_ids and valid_ids & set(dataset.splits["evaluation"]):
+                raise HTTPException(422, "예시 데이터와 평가 데이터가 섞여 있습니다. 각각 별도 파일로 제출하세요.")
+            scope = "demo" if submitted_ids and all(
+                isinstance(pid, str) and pid in public_reference_ids for pid in submitted_ids
+            ) else "evaluation"
+        paper_ids = dataset.splits[scope]
         if body.paper_ids is not None and (
             len(body.paper_ids) != len(paper_ids) or set(body.paper_ids) != set(paper_ids)
         ):
             raise HTTPException(422, "고정 평가 범위와 paper_ids가 다릅니다.")
         try:
-            report = evaluate(dataset, predictions, paper_ids, body.scope)
+            report = evaluate(dataset, predictions, paper_ids, scope)
         except SubmissionError as exc:
             raise HTTPException(422, {"message": "제출 형식을 확인하세요.", "errors": exc.errors}) from None
         report["split_version"] = dataset.SPLIT_VERSION

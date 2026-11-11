@@ -153,7 +153,6 @@ async function initialize() {
     I18n.setText($("#connection-status"), () => msg("워크스페이스 연결됨"));
     $("#connection-dot").style.background = "";
     showMessage("#global-message", "");
-    updateScopeHint();
     navigate(location.hash.slice(1) || "evaluate", false);
     refreshJudgeStatus();
   } catch (error) { showMessage("#global-message", (error.uiMessage || error.message), "error"); I18n.setText($("#connection-status"), () => msg("연결 확인 필요")); $("#connection-dot").style.background = "#c0856e"; }
@@ -176,14 +175,6 @@ async function refreshJudgeStatus() {
   if (state.run) renderReport();
   if (status.configured && !status.ready) state.judgeStatusTimer = setTimeout(refreshJudgeStatus, 10000);
 }
-function updateScopeHint() {
-  const scope = $("#scope").value;
-  const rawCount = state.config?.dataset?.splits?.[scope];
-  const count = Array.isArray(rawCount) ? rawCount.length : rawCount;
-  let message = msg("{0} 세트{1}의 모든 논문을 평가합니다. 미제출 논문도 Recall의 분모에 포함됩니다.", scopeLabels[scope], count !== undefined ? msg(" {0}편", number(count)) : "");
-  if (scope === "evaluation") message = I18n.join([message, msg(" 평가 전에는 모델과 생성 프롬프트를 고정하세요.")]);
-  I18n.setText($("#scope-hint"), () => message);
-}
 async function readFile(file) {
   if (!state.session?.can_manage || !file) return;
   const limit = state.config?.limits?.max_upload_bytes || 10 * 1024 * 1024;
@@ -202,7 +193,6 @@ async function loadSample() {
     const sample = await api("/api/sample");
     $("#prediction-text").value = sample.predictions.map(prediction => JSON.stringify(prediction)).join("\n");
     $("#run-name").value = msg("입력 형식 예제 · 참조 표현 전체");
-    $("#scope").value = sample.scope || "demo"; updateScopeHint();
     const questionCount = sample.predictions.reduce((sum, paper) => sum + paper.questions.length, 0);
     I18n.setText($("#file-label"), () => msg("참조 표현을 모두 담은 형식 예제 · {0}편 / {1}문항", sample.predictions.length, questionCount));
     state.isSample = true; $("#demo-notice").hidden = false;
@@ -214,7 +204,7 @@ async function submitEvaluation(event) {
   event.preventDefault();
   const predictions = $("#prediction-text").value.trim();
   if (!predictions) { showMessage("#upload-errors", msg("생성 결과 파일을 선택하거나 JSON/JSONL을 붙여넣어주세요."), "error"); $("#prediction-text").focus(); return; }
-  const payload = { name: $("#run-name").value.trim(), scope: $("#scope").value, predictions };
+  const payload = { name: $("#run-name").value.trim(), predictions };
   const button = $("#evaluate-button"); setBusy(button, true, msg("표현 채점 중")); showMessage("#upload-errors", "");
   try {
     const run = await api("/api/runs", { method: "POST", body: JSON.stringify(payload) });
@@ -619,7 +609,6 @@ function bindEvents() {
   $$("[data-page]").forEach(button => button.addEventListener("click", () => navigate(button.dataset.page)));
   $$("[data-go]").forEach(button => button.addEventListener("click", () => navigate(button.dataset.go)));
   window.addEventListener("hashchange", () => navigate(location.hash.slice(1), false));
-  $("#scope").addEventListener("change", updateScopeHint);
   $("#prediction-file").addEventListener("change", event => readFile(event.target.files[0]));
   $("#prediction-text").addEventListener("input", () => { state.isSample = false; $("#demo-notice").hidden = true; });
   const drop = $("#dropzone");

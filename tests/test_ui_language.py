@@ -99,7 +99,7 @@ def test_saved_choice_and_cross_tab_changes_do_not_reload_or_reset_inputs(page, 
     pw.expect(page.locator("html")).to_have_attribute("lang", "en")
     page.locator("#run-name").fill("모델 평가")  # Must not be mistaken for a UI translation key.
     page.locator("#prediction-text").fill('[{"paper_id":"keep my input"}]')
-    page.locator("#scope").select_option("evaluation")
+    pw.expect(page.locator("#evaluation-form select")).to_have_count(0)
     page.evaluate("window.languageTestMarker = 1234")
     requests = []
     page.on("request", lambda request: requests.append(request.url))
@@ -109,7 +109,6 @@ def test_saved_choice_and_cross_tab_changes_do_not_reload_or_reset_inputs(page, 
     assert page.evaluate("window.languageTestMarker") == 1234
     pw.expect(page.locator("#run-name")).to_have_value("모델 평가")
     pw.expect(page.locator("#prediction-text")).to_have_value('[{"paper_id":"keep my input"}]')
-    pw.expect(page.locator("#scope")).to_have_value("evaluation")
     language(page, "ko")
     page.reload(wait_until="networkidle")
     pw.expect(page.locator("html")).to_have_attribute("lang", "ko")
@@ -228,7 +227,7 @@ def test_example_downloads_and_submission_score_full_marks_in_both_languages(pag
     pw.expect(page.locator("#dataset-size-demo")).to_have_text("3")
     pw.expect(page.locator("#dataset-size-evaluation")).to_have_text("1,044")
     assert page.locator("#dataset-scope option").evaluate_all("els => els.map(el => el.value)") == ["demo", "evaluation"]
-    assert page.locator("#scope option").evaluate_all("els => els.map(el => el.value)") == ["demo", "evaluation"]
+    pw.expect(page.locator("#evaluation-form select")).to_have_count(0)
     downloads = {}
     for kind in ("papers", "labels", "answers"):
         with page.expect_download() as event:
@@ -244,7 +243,6 @@ def test_example_downloads_and_submission_score_full_marks_in_both_languages(pag
     pw.expect(page.locator("#example-download-description")).to_contain_text("100점")
     page.locator('[data-page="evaluate"]').click()
     page.locator("#run-name").fill("예시 다운로드 검증")
-    page.locator("#scope").select_option("demo")
     page.locator("#prediction-text").fill(json.dumps(downloads["answers"], ensure_ascii=False))
     page.locator("#evaluate-button").click()
     pw.expect(page.locator("#report-section")).to_be_visible()
@@ -268,3 +266,33 @@ def test_storage_denied_still_allows_switching(browser, web_url):
     pw.expect(page.locator("#load-sample")).to_contain_text("Load example")
     context.close()
     assert not errors
+
+
+def test_upload_after_example_load_uses_file_ids_without_a_scope_selector(page):
+    pw.expect(page.locator("#evaluation-form select")).to_have_count(0)
+    page.locator("#load-sample").click()
+    pw.expect(page.locator("#prediction-text")).not_to_have_value("")
+    sample_text = page.locator("#prediction-text").input_value()
+    manifest = page.request.get(page.url + "api/splits").json()
+    evaluation_id = manifest["splits"]["evaluation"][0]
+    prediction = json.dumps({"paper_id": evaluation_id, "questions": []})
+    page.locator("#prediction-file").set_input_files({
+        "name": "evaluation.jsonl", "mimeType": "application/json", "buffer": prediction.encode(),
+    })
+    pw.expect(page.locator("#prediction-text")).to_have_value(prediction)
+    with page.expect_response(lambda response: response.url.endswith("/api/runs") and response.request.method == "POST") as created:
+        page.locator("#evaluate-button").click()
+    response = created.value
+    assert response.status == 201
+    assert "scope" not in response.request.post_data_json
+    report = response.json()["report"]
+    assert report["scope"]["name"] == "evaluation"
+    assert report["scope"]["paper_count"] == 1044
+    assert report["counts"]["gold"] == 4832
+    pw.expect(page.locator("#report-meta")).to_contain_text("Evaluation · 1,044 papers")
+    # Pasting downloaded examples after a real evaluation must also re-detect.
+    page.locator("#prediction-text").fill(sample_text)
+    with page.expect_response(lambda response: response.url.endswith("/api/runs") and response.request.method == "POST") as created:
+        page.locator("#evaluate-button").click()
+    assert created.value.json()["report"]["scope"]["name"] == "demo"
+    assert created.value.json()["report"]["metrics"]["final_score"] == 100
