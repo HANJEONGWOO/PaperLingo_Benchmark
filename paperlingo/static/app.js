@@ -143,6 +143,7 @@ async function initialize() {
     I18n.setText($("#stat-papers"), () => number(evaluationStats.paper_count));
     I18n.setText($("#stat-expressions"), () => number(evaluationStats.expression_count));
     I18n.setText($("#stat-domains"), () => number(evaluationStats.domain_count));
+    I18n.setText($("#stat-question-limit"), () => number(state.config.limits.max_questions_per_paper));
     ["demo", "evaluation"].forEach(scope => {
       const value = summary.splits?.[scope];
       I18n.setText($("#dataset-size-" + scope), () => value === undefined ? "—" : number(Array.isArray(value) ? value.length : value));
@@ -509,11 +510,13 @@ async function compareRuns() {
     const comparable = sameScope && left.dataset_version === right.dataset_version && left.metrics_version === right.metrics_version && left.quality_policy_version === right.quality_policy_version;
     const warnings = [];
     if (!comparable) warnings.push(msg("평가 데이터 버전, 지표·검수 규칙 버전 또는 대상 논문이 서로 다릅니다. 아래 수치는 참고용이며 동일 조건의 성능 비교로 해석할 수 없습니다."));
+    if ((left.max_questions_per_paper ?? 5) !== (right.max_questions_per_paper ?? 5)) warnings.push(msg("논문당 생성 한도가 서로 다릅니다. 아래 수치는 동일 조건의 성능 비교로 해석할 수 없습니다."));
     if (results.some(run => run.is_demo)) warnings.push(msg("직접 작성한 형식 예제가 포함되어 있습니다. 실제 생성 모델의 성능 비교가 아닙니다."));
     if (results.some(run => run.report.metrics.final_score == null)) warnings.push(msg("검수가 미완료되었거나 최종 점수를 정의할 수 없는 평가가 포함되어 있습니다."));
     showMessage("#comparison-warning", I18n.join(warnings, "\n"), "warning");
     const table = node("table"), head = node("thead"), header = node("tr"); header.append(node("th", "", () => msg("비교 항목"))); results.forEach(run => header.append(node("th", "", () => run.name, true))); head.append(header); table.append(head);
     const rows = [[msg("평가 대상"), report => msg("{0} · {1}편", scopeLabels[report.scope.name] || report.scope.name, report.scope.paper_count)], [msg("데이터 버전"), report => String(report.dataset_version).slice(0, 12)], [msg("채점 기준 버전"), report => scoringRule(report.metrics_version).version], [msg("검수 기준"), report => report.quality_policy_version || msg("이전 기준")], [msg("최종 점수 계산식"), report => scoringRule(report.metrics_version).formula], ["Recall", report => percent(report.metrics.recall_pct)], [msg("일치 문항 통과율 / 품질"), report => percent(report.metrics.quality_matched_pct)], ["Precision", report => percent(report.metrics.precision_pct)], [msg("F1 · 보조 지표"), report => percent(report.metrics.f1_pct)], [msg("전체 문항 통과율 / 품질"), report => percent(report.metrics.quality_all_pct)], [msg("원문 일치 유일률 (코드)"), report => percent(report.metrics.source_unique_answer_rate_pct)], [msg("단일 정답률 (의미 검수)"), report => percent(report.metrics.unique_answer_rate_pct)], [msg("논문 제출률"), report => percent(report.metrics.coverage_pct)], [msg("최종 점수"), report => percent(report.metrics.final_score, " / 100")]];
+    rows.splice(1, 0, [msg("논문당 생성 한도"), report => number(report.max_questions_per_paper ?? 5)]);
     const body = node("tbody"); rows.forEach(([label, getter]) => { const row = node("tr"); row.append(node("td", "", () => label)); results.forEach(run => row.append(node("td", "table-number", () => getter(run.report)))); body.append(row); }); table.append(body);
     $("#comparison-table").replaceChildren(table); $("#comparison").hidden = false; $("#comparison").scrollIntoView({ behavior: "smooth", block: "start" });
   } catch (error) { toast((error.uiMessage || error.message)); }

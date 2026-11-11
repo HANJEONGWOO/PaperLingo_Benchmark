@@ -3,6 +3,7 @@
 Uses an isolated local server/database and never invokes an LLM.
 """
 import json
+from copy import deepcopy
 import os
 from pathlib import Path
 import socket
@@ -163,9 +164,9 @@ def test_validation_messages_translate_in_place(page):
     pw.expect(page.locator("#upload-errors")).to_contain_text("JSONL 1행")
     language(page, "en")
     pw.expect(page.locator("#upload-errors")).to_contain_text("JSONL line 1")
-    page.locator("#prediction-text").fill('[{"paper_id":"0911.3369","questions":[' + ','.join(['{}'] * 6) + ']}]')
+    page.locator("#prediction-text").fill('[{"paper_id":"0911.3369","questions":[' + ','.join(['{}'] * 11) + ']}]')
     page.locator("#evaluate-button").click()
-    pw.expect(page.locator("#upload-errors")).to_contain_text("At most 5 questions")
+    pw.expect(page.locator("#upload-errors")).to_contain_text("At most 10 questions")
 
 
 def test_data_guide_and_mobile_layout_keep_evaluation_downloads_disabled(page):
@@ -177,6 +178,7 @@ def test_data_guide_and_mobile_layout_keep_evaluation_downloads_disabled(page):
         pw.expect(page.locator("#stat-papers")).to_have_text("1,044")
         pw.expect(page.locator("#stat-expressions")).to_have_text("4,832")
         pw.expect(page.locator("#stat-domains")).to_have_text("147")
+        pw.expect(page.locator("#stat-question-limit")).to_have_text("10")
         pw.expect(page.locator(".dataset-strip > div > span").nth(0)).to_have_text(labels[0])
         pw.expect(page.locator(".dataset-strip > div > span").nth(1)).to_have_text(labels[1])
         pw.expect(page.locator(".dataset-strip > div > span").nth(2)).to_have_text(labels[2])
@@ -296,3 +298,24 @@ def test_upload_after_example_load_uses_file_ids_without_a_scope_selector(page):
         page.locator("#evaluate-button").click()
     assert created.value.json()["report"]["scope"]["name"] == "demo"
     assert created.value.json()["report"]["metrics"]["final_score"] == 100
+
+
+def test_comparison_identifies_old_five_and_new_ten_question_limits(page, web_url):
+    sample = page.request.get(web_url + "/api/sample").json()["predictions"]
+    response = page.request.post(web_url + "/api/runs", headers={"X-Requested-With": "PaperLingo"}, data={
+        "name": "current limit", "predictions": sample,
+    })
+    assert response.status == 201
+    current = response.json()
+    legacy = deepcopy(current)
+    legacy["name"] = "old limit"
+    legacy["report"].pop("max_questions_per_paper")
+    page.route("**/api/runs/budget-old", lambda route: route.fulfill(json=legacy))
+    page.route("**/api/runs/budget-new", lambda route: route.fulfill(json=current))
+    page.locator('[data-page="history"]').click()
+    page.evaluate("async () => { state.selectedRuns = new Set(['budget-old', 'budget-new']); await compareRuns(); }")
+    pw.expect(page.locator("#comparison-warning")).to_contain_text("The per-paper question limits differ.")
+    row = page.locator("#comparison-table tr").filter(has=page.get_by_text("Max questions per paper", exact=True))
+    pw.expect(row.locator("td")).to_have_text(["Max questions per paper", "5", "10"])
+    language(page, "ko")
+    pw.expect(page.locator("#comparison-warning")).to_contain_text("논문당 생성 한도가 서로 다릅니다.")

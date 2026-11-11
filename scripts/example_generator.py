@@ -29,6 +29,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from paperlingo.judge import JudgeConfig, _json_format_unsupported, _response_identity, _usage, strict_json_loads  # noqa: E402
 from paperlingo.dataset import occurrences  # noqa: E402
+from paperlingo.submission import MAX_QUESTIONS_PER_PAPER  # noqa: E402
 
 
 def to_prediction(paper: dict, generated: dict) -> dict:
@@ -43,8 +44,8 @@ def to_prediction(paper: dict, generated: dict) -> dict:
     if generated["paper_id"] != paper["paper_id"]:
         raise ValueError("Generator returned the wrong paper_id.")
     questions = generated["questions"]
-    if not isinstance(questions, list) or len(questions) > 5:
-        raise ValueError("Generator must return 0–5 questions.")
+    if not isinstance(questions, list) or len(questions) > MAX_QUESTIONS_PER_PAPER:
+        raise ValueError(f"Generator must return 0–{MAX_QUESTIONS_PER_PAPER} questions.")
     required = {"expression_text", "options", "answer_id"}
     converted = []
     for question in questions:

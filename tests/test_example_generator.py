@@ -96,10 +96,12 @@ def test_old_or_extra_question_fields_rejected(paper, prediction, old_field):
         to_prediction(paper, prediction)
 
 
-def test_zero_questions_allowed_and_more_than_five_rejected(paper, prediction):
+def test_zero_to_ten_questions_allowed_and_eleven_rejected(paper, prediction):
     assert to_prediction(paper, {"paper_id": "p1", "questions": []})["questions"] == []
-    prediction["questions"] *= 6
-    with pytest.raises(ValueError, match="0–5"):
+    prediction["questions"] *= 10
+    assert len(to_prediction(paper, prediction)["questions"]) == 10
+    prediction["questions"].append(prediction["questions"][0])
+    with pytest.raises(ValueError, match="0–10"):
         to_prediction(paper, prediction)
 
 

@@ -28,8 +28,9 @@ from .dataset import Dataset
 from .judge import JudgeConfig, judge_item, quality_from_review, temporary_quality, QUALITY_POLICY_VERSION
 from .scoring import METRICS_VERSION, SubmissionError, evaluate, recompute
 from .storage import Store, now, report_status
+from .submission import MAX_QUESTIONS_PER_PAPER
 
-VERSION = "0.10.0"
+VERSION = "0.11.0"
 COOKIE = "paperlingo_session"
 
 
@@ -286,7 +287,7 @@ def create_app(settings: Settings | None = None):
         need_read(request)
         return {"dataset": dataset.summary(), "review_mode": cfg.review_mode,
                 "quality_policy_version": CODE_REVIEW_POLICY if cfg.review_mode == "code" else QUALITY_POLICY_VERSION,
-                "judge": {"configured": cfg.judge_configured, "automatic": cfg.review_mode == "llm" and cfg.judge_configured, "model": cfg.judge_model, "base_url": cfg.judge_base_url, "concurrency": cfg.judge_concurrency}, "auth_required": bool(cfg.password) and not cfg.public_access, "public_read": cfg.public_read or cfg.public_access, "public_access": cfg.public_access, "can_manage": is_admin(request), "limits": {"max_upload_bytes": cfg.max_request_bytes, "judge_batch_size": cfg.judge_batch_size, "max_runs": cfg.max_runs}, "metrics_version": METRICS_VERSION, "version": VERSION}
+                "judge": {"configured": cfg.judge_configured, "automatic": cfg.review_mode == "llm" and cfg.judge_configured, "model": cfg.judge_model, "base_url": cfg.judge_base_url, "concurrency": cfg.judge_concurrency}, "auth_required": bool(cfg.password) and not cfg.public_access, "public_read": cfg.public_read or cfg.public_access, "public_access": cfg.public_access, "can_manage": is_admin(request), "limits": {"max_questions_per_paper": MAX_QUESTIONS_PER_PAPER, "max_upload_bytes": cfg.max_request_bytes, "judge_batch_size": cfg.judge_batch_size, "max_runs": cfg.max_runs}, "metrics_version": METRICS_VERSION, "version": VERSION}
 
     @app.get("/api/judge/status")
     async def judge_status(request: Request):
@@ -399,7 +400,7 @@ def create_app(settings: Settings | None = None):
             "version": VERSION,
             "submission_format": "compact-v1",
             "input": "논문별 객체의 JSON 배열 또는 JSONL",
-            "max_questions_per_paper": 5,
+            "max_questions_per_paper": MAX_QUESTIONS_PER_PAPER,
             "scopes": ["demo", "evaluation"],
             "scope_optional": True,
             "scope_selection": "automatic_when_omitted",

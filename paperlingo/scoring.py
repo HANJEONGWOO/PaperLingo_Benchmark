@@ -11,7 +11,7 @@ import math
 
 from .dataset import Dataset, domain_code, occurrences, word_boundary
 from .code_review import CODE_REVIEW_POLICY, code_quality, normalize_option
-from .submission import COMPACT_FIELDS, INFERENCE_POLICY, generated_question_id, normalize_question, question_format
+from .submission import COMPACT_FIELDS, INFERENCE_POLICY, MAX_QUESTIONS_PER_PAPER, generated_question_id, normalize_question, question_format
 
 
 METRICS_VERSION = "exact-rq-v3"
@@ -86,8 +86,8 @@ def _fatal_validation(dataset: Dataset, predictions: list[dict], paper_ids: list
         if not isinstance(questions, list):
             errors.append(f"{prefix}: questions 배열이 필요합니다.")
             continue
-        if len(questions) > 5:
-            errors.append(f"{prefix}: 논문당 문항은 최대 5개입니다. 임의로 잘라내지 않습니다.")
+        if len(questions) > MAX_QUESTIONS_PER_PAPER:
+            errors.append(f"{prefix}: 논문당 문항은 최대 {MAX_QUESTIONS_PER_PAPER}개입니다. 임의로 잘라내지 않습니다.")
         for position, question in enumerate(questions):
             label = f"{prefix}.questions[{position}]"
             if not isinstance(question, dict):
@@ -213,6 +213,7 @@ def evaluate(dataset: Dataset, predictions: list[dict], paper_ids: list[str], sc
     predictions_by_id = {prediction["paper_id"]: prediction for prediction in predictions}
     report = {
         "metrics_version": METRICS_VERSION,
+        "max_questions_per_paper": MAX_QUESTIONS_PER_PAPER,
         "quality_policy_version": QUALITY_POLICY_VERSION,
         "dataset_version": dataset.version,
         "scope": {"name": scope_name, "paper_ids": list(paper_ids), "paper_count": len(paper_ids)},

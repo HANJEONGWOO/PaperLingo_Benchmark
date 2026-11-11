@@ -213,7 +213,7 @@ def test_fatal_contract_failures(dataset, case):
     elif case == "extra":
         predictions[0]["score"] = 100
     elif case == "too_many":
-        predictions[0]["questions"] = [question(dataset, question_id=f"q{i}") for i in range(6)]
+        predictions[0]["questions"] = [question(dataset, question_id=f"q{i}") for i in range(11)]
     elif case == "bad_expression_type":
         predictions[0]["questions"][0]["expression_text"] = 1
     elif case == "extra_question_field":

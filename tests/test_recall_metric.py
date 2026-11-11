@@ -198,11 +198,45 @@ def test_recall_denominator_uses_actual_labels_including_missing_papers(settings
         assert report["metrics"]["final_score"] == pytest.approx(100 / 3)
 
 
-def test_six_questions_are_rejected_instead_of_truncated(settings):
+@pytest.mark.parametrize("count", [6, 10])
+def test_up_to_ten_questions_score_the_last_question_without_truncation(settings, count):
+    from dataclasses import replace
+
+    extras = ["similar to", "a function of", "associated with", "based on",
+              "The outcome", "The result", "Changes", "observations"]
+    expressions = ["consistent with", *extras[:count - 2], "depend on"]
+    questions = []
+    for expression in expressions:
+        answer = expression.split()[-1]
+        questions.append({"expression_text": expression, "answer_id": 0,
+                          "options": [answer, *[value for value in ("at", "for", "of", "to") if value != answer][:3]]})
+    with TestClient(create_app(replace(settings, review_mode="code"))) as client:
+        assert client.get("/api/schema").json()["max_questions_per_paper"] == 10
+        assert client.get("/api/config").json()["limits"]["max_questions_per_paper"] == 10
+        response = client.post("/api/runs", headers=HEADERS, json={
+            "name": "expanded question budget", "scope": "demo",
+            "predictions": [{"paper_id": "p1", "questions": questions}],
+        })
+        assert response.status_code == 201, response.text
+        run = response.json()
+        report = run["report"]
+        assert report["max_questions_per_paper"] == 10
+        assert report["counts"]["predicted"] == report["counts"]["code_passed"] == count
+        assert report["counts"]["gold"] == report["counts"]["matched"] == 2
+        assert report["papers"][0]["items"][-1]["matched"] is True
+        assert report["metrics"]["final_score"] == report["metrics"]["recall_pct"] == 100
+        assert client.get(f'/api/runs/{run["id"]}/export').json()["report"]["max_questions_per_paper"] == 10
+
+
+def test_eleven_questions_are_rejected_instead_of_truncated(settings):
     with TestClient(create_app(settings)) as client:
-        response = submit(client, count=6)
+        prediction = predictions()
+        prediction[0]["questions"] = [prediction[0]["questions"][0]] * 11
+        response = client.post("/api/runs", headers=HEADERS, json={
+            "name": "too many", "scope": "demo", "predictions": prediction,
+        })
         assert response.status_code == 422
-        assert "최대 5개" in response.text
+        assert "최대 10개" in response.text
         assert client.get("/api/runs").json()["items"] == []
 
 

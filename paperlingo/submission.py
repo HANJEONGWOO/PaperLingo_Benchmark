@@ -15,6 +15,7 @@ import re
 from .dataset import occurrences
 
 
+MAX_QUESTIONS_PER_PAPER = 10
 COMPACT_FIELDS = {"expression_text", "options", "answer_id"}
 LEGACY_FIELDS = {
     "question_id", "expression_type", "expression_span", "context_span",
