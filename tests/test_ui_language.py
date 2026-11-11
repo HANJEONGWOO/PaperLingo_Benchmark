@@ -4,6 +4,7 @@ Uses an isolated local server/database and never invokes an LLM.
 """
 import json
 import os
+import re
 from pathlib import Path
 import socket
 import threading
@@ -92,6 +93,7 @@ def test_updated_page_bypasses_old_unversioned_script(browser, web_url):
         pw.expect(page.locator("#stat-papers")).to_have_text("1,044")
         pw.expect(page.locator("#stat-expressions")).to_have_text("5,497")
         pw.expect(page.locator("#stat-domains")).to_have_text("147")
+        pw.expect(page.locator("#stat-limit")).to_have_text("10")
         pw.expect(page.locator("html")).to_have_attribute("lang", "en")
 
 
@@ -188,10 +190,12 @@ def test_data_guide_and_mobile_layout_keep_evaluation_downloads_disabled(page):
     pw.expect(page.locator("#dataset-size-evaluation")).to_have_text("1,044")
     pw.expect(page.locator("#evaluation-label-download")).to_have_text("Selected expressions ↓")
     pw.expect(page.locator("#evaluation-answer-download")).to_be_disabled()
-    page.locator("#dataset-scope").select_option("evaluation")
-    pw.expect(page.locator("#dataset-count")).to_have_text("Evaluation · 1,044 papers")
+    # Only the two public examples with reference expressions are shown.
+    pw.expect(page.locator("#dataset-list details")).to_have_count(2)
+    pw.expect(page.locator("#dataset-list")).not_to_contain_text("Truly Concurrent Process Algebra")
+    pw.expect(page.locator("#page-dataset")).to_contain_text("Expression extraction examples")
     page.locator("#dataset-list summary").first.click()
-    pw.expect(page.locator("#dataset-list .dataset-paper-body").first).to_contain_text("Evaluation reference expressions are private.")
+    pw.expect(page.locator("#dataset-list .dataset-paper-body").first).to_contain_text("REFERENCE EXPRESSIONS")
     original = page.locator("#dataset-list .abstract-text").first.inner_text()
     language(page, "ko")
     language(page, "en")
@@ -202,7 +206,12 @@ def test_data_guide_and_mobile_layout_keep_evaluation_downloads_disabled(page):
         page.set_viewport_size({"width": width, "height": 844})
         assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
     page.locator('[data-page="method"]').click()
-    pw.expect(page.locator("#page-method")).to_contain_text("Every score should be explainable.")
+    pw.expect(page.locator("#page-method")).to_contain_text("How scores are measured")
+    pw.expect(page.locator("#page-method")).to_contain_text("How is partial credit given?")
+    text = page.locator("body").inner_text()
+    for jargon in ("soft-rq", "exact-rq", "code-basic", "Qmatched", "PAPERLINGO / V1", "protocol v"):
+        assert jargon not in text, jargon
+    assert not re.search(r"DATA [0-9a-f]{12}", text)
     assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
 
 
@@ -224,9 +233,10 @@ def test_switching_during_a_request_restores_translated_button_text(page):
 
 def test_example_downloads_and_submission_score_full_marks_in_both_languages(page, tmp_path):
     page.locator('[data-page="dataset"]').click()
-    pw.expect(page.locator("#dataset-size-demo")).to_have_text("3")
+    pw.expect(page.locator("#dataset-size-demo")).to_have_text("2")
     pw.expect(page.locator("#dataset-size-evaluation")).to_have_text("1,044")
-    assert page.locator("#dataset-scope option").evaluate_all("els => els.map(el => el.value)") == ["demo", "evaluation"]
+    pw.expect(page.locator("#dataset-scope")).to_have_count(0)
+    pw.expect(page.locator("#dataset-search")).to_have_count(0)
     pw.expect(page.locator("#evaluation-form select")).to_have_count(0)
     downloads = {}
     for kind in ("papers", "labels", "answers"):
@@ -236,11 +246,12 @@ def test_example_downloads_and_submission_score_full_marks_in_both_languages(pag
         path = tmp_path / download.suggested_filename
         download.save_as(path)
         downloads[kind] = [json.loads(line) for line in path.read_text().splitlines()]
-        assert len(downloads[kind]) == 3
+        assert len(downloads[kind]) == 2
+        assert "1709.01217" not in json.dumps(downloads[kind])
     assert [row["paper_id"] for row in downloads["papers"]] == [row["paper_id"] for row in downloads["labels"]] == [row["paper_id"] for row in downloads["answers"]]
     assert sum(len(row["questions"]) for row in downloads["answers"]) == 9
     language(page, "ko")
-    pw.expect(page.locator("#example-download-description")).to_contain_text("100점")
+    pw.expect(page.locator("#example-download-description")).to_contain_text("논문 2편")
     page.locator('[data-page="evaluate"]').click()
     page.locator("#run-name").fill("예시 다운로드 검증")
     page.locator("#prediction-text").fill(json.dumps(downloads["answers"], ensure_ascii=False))
@@ -273,8 +284,7 @@ def test_upload_after_example_load_uses_file_ids_without_a_scope_selector(page):
     page.locator("#load-sample").click()
     pw.expect(page.locator("#prediction-text")).not_to_have_value("")
     sample_text = page.locator("#prediction-text").input_value()
-    manifest = page.request.get(page.url + "api/splits").json()
-    evaluation_id = manifest["splits"]["evaluation"][0]
+    evaluation_id = page.request.get(page.url + "api/papers?scope=evaluation&limit=1").json()["items"][0]["paper_id"]
     prediction = json.dumps({"paper_id": evaluation_id, "questions": []})
     page.locator("#prediction-file").set_input_files({
         "name": "evaluation.jsonl", "mimeType": "application/json", "buffer": prediction.encode(),

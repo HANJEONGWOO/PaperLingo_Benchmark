@@ -113,7 +113,7 @@ def test_downloaded_compact_sample_is_the_public_contract(client):
     run = created.json()
     assert run["is_demo"] is True
     report = run["report"]
-    assert [len(paper["items"]) for paper in report["papers"]] == [4, 5, 0]
+    assert [len(paper["items"]) for paper in report["papers"]] == [4, 5]
     assert report["counts"]["gold"] == 9
     assert report["counts"]["predicted"] == 9
     assert report["counts"]["matched"] == 9

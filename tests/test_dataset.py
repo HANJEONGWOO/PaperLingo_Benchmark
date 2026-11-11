@@ -20,29 +20,29 @@ def test_real_reference_integrity_and_splits():
     assert summary["expression_count"] == 6853
     assert summary["domain_count"] == 149
     assert summary["zero_gold_count"] == 23
-    assert summary["splits"] == {"demo": 3, "evaluation": 1044}
+    assert summary["splits"] == {"demo": 2, "evaluation": 1044}
     assert summary["split_stats"] == {
-        "demo": {"paper_count": 3, "expression_count": 9, "domain_count": 2},
+        "demo": {"paper_count": 2, "expression_count": 9, "domain_count": 1},
         "evaluation": {"paper_count": 1044, "expression_count": 5497, "domain_count": 147},
     }
-    assert summary["split_version"] == Dataset.SPLIT_VERSION == "evaluation-min5sentences-v3"
+    assert summary["split_version"] == Dataset.SPLIT_VERSION == "evaluation-min5sentences-v4"
     assert len(dataset.version) == 64
     assert summary["audit"]["word_boundary_flag_count"] == 0
     assert summary["audit"]["duplicate_abstract_groups"] == []
     partitions = [set(dataset.splits[name]) for name in ("demo", "evaluation")]
     excluded = set(dataset.papers) - set.union(*partitions)
-    assert len(excluded) == 443
+    assert len(excluded) == 444
     assert all(dataset.sentence_counts[pid] < 5 for pid in excluded)
     assert partitions[1] == {pid for pid in dataset.papers if pid not in partitions[0] and dataset.sentence_counts[pid] >= 5}
     assert not partitions[0] & partitions[1]
-    assert [len(partition) for partition in partitions] == [3, 1044]
-    assert dataset.splits["demo"] == ["0911.3369", "1109.3182", "1709.01217"]
+    assert [len(partition) for partition in partitions] == [2, 1044]
+    assert dataset.splits["demo"] == ["0911.3369", "1109.3182"]
     assert set(dataset.splits["demo"]) <= partitions[0]
     assert not set(dataset.splits["demo"]) & partitions[1]
     assert sum(len(dataset.labels[pid]) for pid in dataset.splits["evaluation"]) == 5497
     assert summary["evaluation_filter"] == {
         "minimum_sentences": 5, "sentence_policy_version": "abstract-sentences-v1",
-        "source_paper_count": 1487, "eligible_paper_count": 1044, "excluded_paper_count": 443,
+        "source_paper_count": 1488, "eligible_paper_count": 1044, "excluded_paper_count": 444,
         "sampling": "none; retain every eligible paper",
     }
     assert dataset.splits == Dataset(DATA_DIR).splits
@@ -50,13 +50,13 @@ def test_real_reference_integrity_and_splits():
     assert before == {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in DATA_DIR.glob("*.jsonl")}
 
 
-def test_demo_has_empty_gold_and_explicit_authored_samples():
+def test_demo_has_two_labelled_papers_and_explicit_authored_samples():
     dataset = Dataset(DATA_DIR)
     demo = dataset.demo_predictions()
-    assert len(demo) == 3
+    assert len(demo) == 2
     assert [row["paper_id"] for row in demo] == dataset.splits["demo"]
-    assert any(not row["questions"] and not dataset.labels[row["paper_id"]] for row in demo)
-    assert any(row["questions"] for row in demo)
+    assert all(row["questions"] and dataset.labels[row["paper_id"]] for row in demo)
+    assert "1709.01217" not in dataset.splits["demo"] + dataset.splits["evaluation"]
     assert all("직접 작성" in q["learning_point"] for row in demo for q in row["questions"])
     demo[0]["questions"][0]["expression_text"] = "tampered"
     assert dataset.demo_predictions()[0]["questions"][0]["expression_text"] != "tampered"
@@ -66,8 +66,8 @@ def test_demo_has_empty_gold_and_explicit_authored_samples():
 def test_demo_covers_all_nine_gold_expressions_without_duplicates(compact):
     dataset = Dataset(DATA_DIR)
     predictions = dataset.demo_predictions(compact=compact)
-    assert [row["paper_id"] for row in predictions] == ["0911.3369", "1109.3182", "1709.01217"]
-    assert [len(row["questions"]) for row in predictions] == [4, 5, 0]
+    assert [row["paper_id"] for row in predictions] == ["0911.3369", "1109.3182"]
+    assert [len(row["questions"]) for row in predictions] == [4, 5]
     for row in predictions:
         texts = [question["expression_text"] for question in row["questions"]]
         assert len(texts) == len(set(texts)) <= 5
@@ -75,8 +75,9 @@ def test_demo_covers_all_nine_gold_expressions_without_duplicates(compact):
     report = evaluate(dataset, predictions, dataset.splits["demo"], "demo")
     assert report["counts"]["gold"] == report["counts"]["predicted"] == report["counts"]["matched"] == 9
     assert report["counts"]["quality_pending"] == 9
-    for metric in ("precision_pct", "recall_pct", "f1_pct", "structural_validity_pct", "coverage_pct", "empty_gold_abstention_pct"):
+    for metric in ("precision_pct", "recall_pct", "f1_pct", "structural_validity_pct", "coverage_pct"):
         assert report["metrics"][metric] == 100
+    assert report["metrics"]["empty_gold_abstention_pct"] is None  # No example lacks references.
     assert report["metrics"]["final_score"] is None
     assert all(not item["issues"] for paper in report["papers"] for item in paper["items"])
     assert all(not paper["missing_expressions"] for paper in report["papers"])
@@ -95,7 +96,7 @@ def test_demo_covers_all_nine_gold_expressions_without_duplicates(compact):
 
 def test_demo_keeps_preferred_first_questions_and_stable_legacy_identifiers():
     dataset = Dataset(DATA_DIR)
-    first, second, empty = dataset.demo_predictions()
+    first, second = dataset.demo_predictions()
     assert first["questions"][0]["expression_text"] == "identical to"
     assert second["questions"][0]["expression_text"] == "consistent with"
     assert first["questions"][0]["question_id"] == "demo-0911.3369-valid"
@@ -104,7 +105,6 @@ def test_demo_keeps_preferred_first_questions_and_stable_legacy_identifiers():
         assert [question["question_id"] for question in row["questions"][1:]] == [
             f"demo-{row['paper_id']}-expression-{position}" for position in range(2, len(row["questions"]) + 1)
         ]
-    assert empty["questions"] == []
 
 
 def test_downloadable_compact_file_matches_live_demo_and_returns_fresh_copies():
@@ -169,7 +169,7 @@ def test_split_configuration_does_not_change_source_dataset_version(monkeypatch)
     # The grammar answer key is tied to the current split, so compare without it.
     monkeypatch.setattr(Dataset, "EVALUATION_LABELS_FILE", "absent-evaluation-labels.jsonl")
     original = Dataset(DATA_DIR)
-    monkeypatch.setattr(Dataset, "EXAMPLE_PAPER_IDS", ("2208.09462", "1109.3182", "1709.01217"))
+    monkeypatch.setattr(Dataset, "EXAMPLE_PAPER_IDS", ("2208.09462", "1109.3182"))
     monkeypatch.setattr(Dataset, "SPLIT_VERSION", "test-alternate-policy")
     alternate = Dataset(DATA_DIR)
     assert alternate.splits != original.splits
@@ -194,9 +194,9 @@ def test_splits_ignore_source_row_order_and_preserve_references(tmp_path):
     write_fixture(tmp_path, list(reversed(papers)), list(reversed(labels)))
     reordered = Dataset(tmp_path)
     assert reordered.splits == original.splits
-    assert len(reordered.splits["demo"]) == 3
+    assert len(reordered.splits["demo"]) == 2
     assert reordered.splits["evaluation"] == []  # Every synthetic abstract has one sentence.
-    assert reordered.evaluation_filter["excluded_paper_count"] == 17
+    assert reordered.evaluation_filter["excluded_paper_count"] == 18
 
 
 def test_tiny_dataset_keeps_public_examples_out_of_evaluation(tmp_path):
@@ -222,7 +222,7 @@ FIVE_SENTENCES = ("We report a valuable result. The method is simple. The data a
 
 
 def write_override_fixture(tmp_path, override):
-    papers = [{"paper_id": pid, "abstract": FIVE_SENTENCES} for pid in ("d1", "d2", "d3", "e1", "e2")]
+    papers = [{"paper_id": pid, "abstract": FIVE_SENTENCES} for pid in ("d1", "d2", "e1", "e2")]
     labels = [{"paper_id": paper["paper_id"], "expressions": [{"text": "valuable"}]} for paper in papers]
     write_fixture(tmp_path, papers, labels)
     (tmp_path / Dataset.EVALUATION_LABELS_FILE).write_text("\n".join(json.dumps(row) for row in override))

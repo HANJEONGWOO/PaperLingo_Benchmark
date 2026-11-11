@@ -48,9 +48,9 @@ def occurrences(abstract: str, text: str, *, whole_words: bool = False) -> list[
 class Dataset:
     """Load original JSONL files without modifying them or repairing labels."""
 
-    SPLIT_VERSION = "evaluation-min5sentences-v3"
+    SPLIT_VERSION = "evaluation-min5sentences-v4"
     MIN_EVALUATION_SENTENCES = 5
-    EXAMPLE_PAPER_IDS = ("0911.3369", "1109.3182", "1709.01217")
+    EXAMPLE_PAPER_IDS = ("0911.3369", "1109.3182")
     EXAMPLE_ANSWER_VERSION = "authored-demo-v1"
     EVALUATION_LABELS_FILE = "paperlingo-evaluation-labels-1044-grammar.jsonl"
     MAX_REFERENCE_EXPRESSIONS = 10
@@ -185,17 +185,11 @@ class Dataset:
             "warnings": warnings,
         }
 
-        preferred = [paper_id for paper_id in self.EXAMPLE_PAPER_IDS[:2] if paper_id in self.papers and has_source_labels[paper_id]]
-        for paper_id in sorted(self.papers):
-            if len(preferred) >= 2:
-                break
-            if has_source_labels[paper_id] and paper_id not in preferred:
-                preferred.append(paper_id)
-        empty = [paper_id for paper_id in sorted(self.papers) if not has_source_labels[paper_id]]
-        if empty:
-            preferred.append(self.EXAMPLE_PAPER_IDS[2] if self.EXAMPLE_PAPER_IDS[2] in empty else empty[0])
-        for paper_id in sorted(self.papers):
-            if len(preferred) >= 3:
+        # Two public examples, both with reference expressions. Tiny custom
+        # datasets fall back to labelled papers, then to any paper.
+        preferred = [paper_id for paper_id in self.EXAMPLE_PAPER_IDS if paper_id in self.papers and has_source_labels[paper_id]]
+        for paper_id in sorted(self.papers, key=lambda pid: (not has_source_labels[pid], pid)):
+            if len(preferred) >= len(self.EXAMPLE_PAPER_IDS):
                 break
             if paper_id not in preferred:
                 preferred.append(paper_id)

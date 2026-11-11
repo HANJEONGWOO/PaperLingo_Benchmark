@@ -33,7 +33,7 @@ def test_example_answers_auto_select_demo_and_score_full_marks(client, encoding)
     assert response.status_code == 201, response.text
     report = response.json()["report"]
     assert report["scope"]["name"] == "demo"
-    assert report["scope"]["paper_count"] == 3
+    assert report["scope"]["paper_count"] == 2
     assert report["counts"]["gold"] == 9
     assert report["metrics"]["final_score"] == 100
 

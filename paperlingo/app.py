@@ -289,7 +289,7 @@ def create_app(settings: Settings | None = None):
         need_read(request)
         return {"dataset": dataset.summary(), "review_mode": cfg.review_mode,
                 "quality_policy_version": CODE_REVIEW_POLICY if cfg.review_mode == "code" else QUALITY_POLICY_VERSION,
-                "judge": {"configured": cfg.judge_configured, "automatic": cfg.review_mode == "llm" and cfg.judge_configured, "model": cfg.judge_model, "base_url": cfg.judge_base_url, "concurrency": cfg.judge_concurrency}, "auth_required": bool(cfg.password) and not cfg.public_access, "public_read": cfg.public_read or cfg.public_access, "public_access": cfg.public_access, "can_manage": is_admin(request), "limits": {"max_upload_bytes": cfg.max_request_bytes, "judge_batch_size": cfg.judge_batch_size, "max_runs": cfg.max_runs}, "metrics_version": METRICS_VERSION, "version": VERSION}
+                "judge": {"configured": cfg.judge_configured, "automatic": cfg.review_mode == "llm" and cfg.judge_configured, "model": cfg.judge_model, "base_url": cfg.judge_base_url, "concurrency": cfg.judge_concurrency}, "auth_required": bool(cfg.password) and not cfg.public_access, "public_read": cfg.public_read or cfg.public_access, "public_access": cfg.public_access, "can_manage": is_admin(request), "limits": {"max_upload_bytes": cfg.max_request_bytes, "max_questions_per_paper": MAX_QUESTIONS_PER_PAPER, "judge_batch_size": cfg.judge_batch_size, "max_runs": cfg.max_runs}, "metrics_version": METRICS_VERSION, "version": VERSION}
 
     @app.get("/api/judge/status")
     async def judge_status(request: Request):
@@ -315,17 +315,6 @@ def create_app(settings: Settings | None = None):
             pass
         judge_health_cache.update(checked=time.monotonic(), value=value)
         return value
-
-    @app.get("/api/splits")
-    def splits(request: Request, download: bool = False):
-        need_read(request)
-        manifest = {"dataset_version": dataset.version, "split_version": dataset.SPLIT_VERSION,
-                    "splits": dataset.splits, "example_answers": dataset.example_answer_metadata(),
-                    "evaluation_filter": dataset.evaluation_filter,
-                    "evaluation_sentence_counts": {pid: dataset.sentence_counts[pid] for pid in dataset.splits["evaluation"]}}
-        if download:
-            return Response(json.dumps(manifest, ensure_ascii=False, indent=2), media_type="application/json", headers={"Content-Disposition": 'attachment; filename="paperlingo-splits.json"'})
-        return manifest
 
     @app.get("/api/papers")
     def papers(request: Request, q: str = "", offset: int = 0, limit: int = 20, domain: str = "",

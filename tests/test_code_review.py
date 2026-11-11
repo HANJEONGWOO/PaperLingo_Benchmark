@@ -203,7 +203,7 @@ def test_code_results_cannot_be_overwritten_and_exports_include_checks(client):
     assert export["review_history"] == []
     csv_text = client.get(f'/api/runs/{run["id"]}/export?format=csv').text.lstrip("\ufeff")
     rows = list(csv.DictReader(io.StringIO(csv_text)))
-    assert len(rows) == 10  # Nine items plus the explicit empty-gold submission.
+    assert len(rows) == 9  # Nine items across the two examples.
     assert all(row["check_result"] == "pass" and row["designated_answer"] == "True"
                for row in rows if row["question_id"])
     assert all(None not in row for row in rows)

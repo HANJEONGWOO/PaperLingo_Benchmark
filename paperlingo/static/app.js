@@ -2,7 +2,7 @@
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
-const state = { session: null, config: null, judgeStatus: null, judgeStatusTimer: null, run: null, runs: [], selectedRuns: new Set(), reportPage: 0, datasetPage: 0, datasetTotal: 0, pollTimer: null, pollVersion: 0, toastTimer: null, datasetSequence: 0, review: null, isSample: false, skippingRunId: null };
+const state = { session: null, config: null, judgeStatus: null, judgeStatusTimer: null, run: null, runs: [], reportPage: 0, pollTimer: null, pollVersion: 0, toastTimer: null, datasetSequence: 0, review: null, isSample: false, skippingRunId: null };
 const PAGE_SIZE = 10;
 const pageLabels = { evaluate: msg("모델 평가"), history: msg("평가 기록"), dataset: msg("참조 데이터"), method: msg("평가 기준") };
 const scopeLabels = { demo: msg("예시 데이터"), train: msg("학습 (이전 범위)"), evaluation: msg("평가"), development: msg("개발"), validation: msg("검증"), test: msg("최종 평가"), all: msg("전체"), custom: msg("직접 지정") };
@@ -31,10 +31,10 @@ function codeRun(run) { const report = run?.report || run; return report?.qualit
 function referenceCount(paper) { return paper.reference_hidden ? paper.gold_count : (paper.gold_expressions || []).length; }
 function missingCount(paper) { return paper.reference_hidden ? paper.missing_count : (paper.missing_expressions || []).length; }
 function scoringRule(version) {
-  if (version === "soft-rq-v4") return { version, label: "v4", formula: "100 × Rsoft × Qmatched", legacy: false, soft: true };
-  if (version === "exact-rq-v3") return { version, label: "v3", formula: "100 × R × Qmatched", legacy: false };
-  if (["exact-prq-v1", "exact-prq-v2"].includes(version)) return { version, label: version.endsWith("v1") ? "v1" : "v2", formula: "100 × P × R × Qmatched", legacy: true };
-  return { version: version || msg("버전 정보 없음"), label: msg("이전 계산식"), formula: "100 × P × R × Qmatched", legacy: true };
+  // Version codes stay internal; the UI shows only formulas and "previous scoring".
+  if (version === "soft-rq-v4") return { formula: "100 × R × Qcheck", legacy: false, soft: true };
+  if (version === "exact-rq-v3") return { formula: "100 × R × Qcheck", legacy: true };
+  return { formula: "100 × P × R × Q", legacy: true };
 }
 function localJudge() { try { return ["localhost", "127.0.0.1", "::1", "[::1]"].includes(new URL(state.config?.judge?.base_url).hostname); } catch { return false; } }
 function empty(title, description) { const box = node("div", "empty-state"); box.append(node("strong", "", () => title), node("p", "", () => description)); return box; }
@@ -125,7 +125,6 @@ function updateAccess() {
   const session = state.session || {};
   $$(".manage-only").forEach(button => { button.hidden = !session.can_manage; });
   $("#readonly-banner").hidden = !!session.can_manage;
-  I18n.setText($("#access-label"), () => session.public_access ? msg("공개 워크스페이스") : session.can_manage ? session.auth_required ? msg("팀 관리자") : msg("로컬 워크스페이스") : msg("읽기 전용"));
   $("#auth-button").hidden = !session.auth_required;
   I18n.setText($("#auth-button"), () => session.authenticated && session.can_manage ? msg("로그아웃") : msg("로그인"));
   $("#login-close").hidden = session.auth_required && !session.public_read && !session.authenticated;
@@ -137,18 +136,17 @@ async function initialize() {
     updateAccess();
     if (state.session.auth_required && !state.session.authenticated && !state.session.public_read) { openLogin(); I18n.setText($("#connection-status"), () => msg("팀 로그인 필요")); return; }
     state.config = await api("/api/config");
-    if (state.config.metrics_version) I18n.setText($("#protocol-version"), () => msg("평가 프로토콜 {0}", scoringRule(state.config.metrics_version).label));
     state.judgeStatus = { configured: !!state.config.judge?.configured, ready: false, message: msg("평가 모델의 연결 상태를 확인 중입니다.") };
     const summary = state.config.dataset;
     const evaluationStats = summary.split_stats.evaluation;
     I18n.setText($("#stat-papers"), () => number(evaluationStats.paper_count));
     I18n.setText($("#stat-expressions"), () => number(evaluationStats.expression_count));
     I18n.setText($("#stat-domains"), () => number(evaluationStats.domain_count));
+    if (state.config.limits?.max_questions_per_paper) I18n.setText($("#stat-limit"), () => number(state.config.limits.max_questions_per_paper));
     ["demo", "evaluation"].forEach(scope => {
       const value = summary.splits?.[scope];
       I18n.setText($("#dataset-size-" + scope), () => value === undefined ? "—" : number(Array.isArray(value) ? value.length : value));
     });
-    I18n.setText($("#dataset-version"), () => `DATA ${String(summary.version || "v2").slice(0, 12)}`);
     const maxBytes = state.config.limits?.max_upload_bytes;
     if (maxBytes) I18n.setText($("#upload-limit"), () => msg("최대 {0} MB", Math.round(maxBytes / 1024 / 1024)));
     I18n.setText($("#connection-status"), () => msg("워크스페이스 연결됨"));
@@ -240,12 +238,12 @@ function renderReport() {
   const needsJudge = unresolved > 0 || temporary;
   $("#report-section").hidden = false;
   $("#report-title").textContent = run.name;
-  I18n.setText($("#report-meta"), () => msg("{0} · {1} {2}편 · {3} · {4}{5} · {6}{7}", date(run.created_at), scopeLabels[report.scope.name] || report.scope.name, number(report.scope.paper_count), statusLabels[run.status] || run.status, rule.legacy ? msg("이전 기준 · ") : "", rule.version, report.quality_policy_version || msg("이전 검수 기준"), temporary ? msg(" · 임시 점수") : ""));
+  I18n.setText($("#report-meta"), () => msg("{0} · {1} {2}편 · {3}{4}{5}", date(run.created_at), scopeLabels[report.scope.name] || report.scope.name, number(report.scope.paper_count), statusLabels[run.status] || run.status, rule.legacy ? msg(" · 이전 채점 방식") : "", temporary ? msg(" · 임시 점수") : ""));
   $("#download-json").href = `/api/runs/${encodeURIComponent(run.id)}/export?format=json`;
   $("#download-csv").href = `/api/runs/${encodeURIComponent(run.id)}/export?format=csv`;
   $("#temporary-banner").hidden = !temporary;
   I18n.setText($("#skip-judge-help"), () => msg("구조가 유효한 모든 문항의 Q를 100%로 처리합니다(기존 검수 포함). 이 기록의 최종 점수는 {0}이며 검증된 성능이 아닙니다.", rule.formula));
-  if (temporary) I18n.setText($("#temporary-count"), () => msg("{0}개 문항의 품질을 검수 없이 100%로 임시 처리했습니다. 구조 오류는 0점이며 최종 점수는 {1}로 계산합니다({2}). 검증된 성능이 아니므로 일반 평가와 비교할 수 없습니다.", number(temporaryCount), rule.formula, rule.version));
+  if (temporary) I18n.setText($("#temporary-count"), () => msg("{0}개 문항의 품질을 검수 없이 100%로 임시 처리했습니다. 구조 오류는 0점이며 최종 점수는 {1}로 계산합니다. 검증된 성능이 아니므로 일반 평가와 비교할 수 없습니다.", number(temporaryCount), rule.formula));
   const cards = $("#metric-cards"); cards.replaceChildren(
     rule.soft
       ? metricCard(msg("Recall · 부분 점수 포함"), metrics.recall_pct, msg("정확 {0} + 부분 {1} = {2}점 / {3}개 실제 참조", number(counts.exact_matched), number(counts.partial_matched), number(counts.credited_matches), number(counts.gold)))
@@ -254,7 +252,7 @@ function renderReport() {
       ? metricCard(msg("Precision · 보조 지표"), metrics.precision_pct, msg("{0}점 / {1}개 생성", number(counts.credited_matches), number(counts.predicted)))
       : metricCard(rule.legacy ? msg("Precision · 선정 정확도") : msg("Precision · 보조 지표"), metrics.precision_pct, msg("{0}개 일치 / {1}개 생성", number(counts.matched), number(counts.predicted))),
     metricCard(msg("F1 · 보조 지표"), metrics.f1_pct, msg("Precision과 Recall의 조화평균")),
-    metricCard(code ? msg("Q · 일치 문항 통과율") : temporary ? msg("Q · 일치 문항 품질 (임시)") : msg("Q · 일치 문항 품질"), metrics.quality_matched_pct, code ? msg("참조 라벨과 일치한 문항 중 검사 통과 비율") : temporary ? msg("검수 없이 만점 처리한 문항 포함") : msg("참조 라벨과 일치한 문항의 평균"), false, unresolved > 0 && counts.matched > 0),
+    metricCard(code ? msg("Qcheck · 일치 문항 통과율") : temporary ? msg("Q · 일치 문항 품질 (임시)") : msg("Q · 일치 문항 품질"), metrics.quality_matched_pct, code ? msg("참조 라벨과 일치한 문항 중 검사 통과 비율") : temporary ? msg("검수 없이 만점 처리한 문항 포함") : msg("참조 라벨과 일치한 문항의 평균"), false, unresolved > 0 && counts.matched > 0),
     metricCard(temporary ? msg("최종 점수 · 임시") : rule.legacy ? msg("최종 점수 · 이전 기준") : msg("최종 점수"), metrics.final_score, msg("{0}{1}", temporary ? msg("검증 전 임시값 · ") : "", rule.formula), true, unresolved > 0, "/ 100")
   );
   $("#report-secondary").replaceChildren(
@@ -270,7 +268,7 @@ function renderReport() {
   const notices = [];
   if (code) notices.push(msg("코드 검사 결과입니다. 유일한 정답은 원문 빈칸과 문자열이 일치하는 보기가 하나라는 뜻입니다. 문맥 충분성·의미적 복수 정답·오답의 교육적 품질은 검사하지 않았습니다."));
   else if (state.config?.review_mode === "code") notices.push(msg("이 기록은 이전 검수 기준을 유지합니다. 네 가지 코드 검사 점수는 같은 입력으로 새 평가를 제출하면 확인할 수 있습니다."));
-  if (rule.legacy) notices.push(msg("이 기록은 이전 기준 {0}({1})로 계산한 점수를 유지합니다. 새 평가의 v3 기준과 직접 비교할 수 없습니다.", rule.version, rule.formula));
+  if (rule.legacy) notices.push(msg("이 기록은 이전 채점 방식({0})으로 계산한 점수를 유지합니다. 현재 방식으로 계산한 점수와 직접 비교할 수 없습니다.", rule.formula));
   if (run.is_demo) notices.push(msg("형식 예제 · 참조 라벨을 참고해 직접 작성한 예제입니다. 실제 생성 모델의 기준 성능이 아닙니다."));
   if (report.papers.some(paper => paper.items.some(item => item.quality?.source === "llm"))) notices.push(msg("LLM 판정에는 오류가 있을 수 있습니다. 기준 성능 비교 전 문항별 근거와 사람의 표본 검수를 확인하세요."));
   $("#judge-progress").hidden = !active;
@@ -463,8 +461,6 @@ async function skipJudge() {
   try {
     const run = await api(`/api/runs/${encodeURIComponent(id)}/skip-judge`, { method: "POST", body: "{}" });
     if (state.run?.id === id) state.run = run;
-    state.selectedRuns.delete(id);
-    $("#comparison").hidden = true;
     toast(msg("구조가 유효한 문항의 품질을 100%로 임시 처리했습니다."));
   } catch (error) { toast((error.uiMessage || error.message)); if (state.run?.id === id) showMessage("#report-notice", (error.uiMessage || error.message), "error"); }
   finally { state.skippingRunId = null; if (state.run?.id === id) { renderReport(); schedulePoll(); } }
@@ -472,61 +468,30 @@ async function skipJudge() {
 
 async function loadHistory() {
   const container = $("#run-list");
-  $("#comparison").hidden = true;
   try {
     const result = await api("/api/runs"); state.runs = result.items || [];
-    state.selectedRuns = new Set([...state.selectedRuns].filter(id => state.runs.some(run => run.id === id && !temporaryRun(run))));
     container.replaceChildren();
-    if (!state.runs.length) { container.append(empty(msg("아직 평가 기록이 없습니다"), msg("모델 평가에서 예제를 불러와 첫 평가를 시작해보세요."))); $("#compare-button").disabled = true; return; }
+    if (!state.runs.length) { container.append(empty(msg("아직 평가 기록이 없습니다"), msg("모델 평가에서 예제를 불러와 첫 평가를 시작해보세요."))); return; }
     const table = node("table"), head = node("thead"), row = node("tr");
-    [msg("선택"), msg("평가 이름"), msg("대상"), msg("상태"), "Recall", msg("보기 검사 / 품질"), msg("최종 점수")].forEach(label => row.append(node("th", "", () => label))); head.append(row); table.append(head);
+    [msg("평가 이름"), msg("대상"), msg("상태"), "Recall", msg("보기 검사 / 품질"), msg("최종 점수")].forEach(label => row.append(node("th", "", () => label))); head.append(row); table.append(head);
     const body = node("tbody");
     state.runs.forEach(run => {
       const temporary = temporaryRun(run);
-      const tr = node("tr"), checkCell = node("td"), checkbox = node("input"); checkbox.type = "checkbox"; checkbox.checked = state.selectedRuns.has(run.id); checkbox.disabled = temporary; I18n.setAttribute(checkbox, "title", () => temporary ? msg("임시 품질 만점 기록은 성능 비교에 사용할 수 없습니다.") : msg("비교할 평가를 선택하세요.")); I18n.setAttribute(checkbox, "aria-label", () => msg("{0}{1}", run.name, temporary ? msg(" 임시 점수 · 비교 불가") : msg(" 비교 선택")));
-      checkbox.addEventListener("change", () => { if (checkbox.checked && state.selectedRuns.size >= 2) { checkbox.checked = false; toast(msg("비교할 평가를 최대 2개 선택하세요.")); return; } if (checkbox.checked) state.selectedRuns.add(run.id); else state.selectedRuns.delete(run.id); $("#compare-button").disabled = state.selectedRuns.size !== 2; });
-      checkCell.append(checkbox); tr.append(checkCell);
+      const tr = node("tr");
       const nameCell = node("td"), button = node("button", "run-name-button", () => run.name, true); button.addEventListener("click", () => loadRun(run.id)); nameCell.append(button);
       if (codeRun(run)) nameCell.append(document.createTextNode(" "), tag(msg("코드 검사")));
       if (run.is_demo) nameCell.append(document.createTextNode(" "), tag(msg("형식 예제")));
       if (temporary) nameCell.append(document.createTextNode(" "), tag(msg("임시 · 검수 스킵"), "temporary"));
       const rule = scoringRule(run.metrics_version);
-      if (rule.legacy) nameCell.append(document.createTextNode(" "), tag(msg("이전 기준 {0}", rule.label)));
-      nameCell.append(node("div", "run-date", () => `${date(run.created_at)} · ${rule.version}`)); tr.append(nameCell);
+      if (rule.legacy) nameCell.append(document.createTextNode(" "), tag(msg("이전 채점 방식")));
+      nameCell.append(node("div", "run-date", () => date(run.created_at))); tr.append(nameCell);
       const scope = typeof run.scope === "object" ? run.scope?.name : run.scope;
       tr.append(node("td", "", () => scopeLabels[scope] || scope || "—"));
       const status = node("td"); status.append(temporary && !judgeActive(run) ? tag(msg("임시 점수"), "temporary") : statusTag(run.status)); tr.append(status);
       tr.append(node("td", "table-number", () => percent(run.metrics?.recall_pct)), node("td", "table-number", () => percent(run.metrics?.quality_matched_pct)), node("td", "table-number", () => percent(run.metrics?.final_score, ""))); body.append(tr);
-    }); table.append(body); container.append(table); $("#compare-button").disabled = state.selectedRuns.size !== 2;
+    }); table.append(body); container.append(table);
   } catch (error) { container.replaceChildren(empty(msg("평가 기록을 불러오지 못했습니다"), (error.uiMessage || error.message))); }
 }
-async function compareRuns() {
-  if (state.selectedRuns.size !== 2) return;
-  const button = $("#compare-button"); setBusy(button, true, msg("비교 준비 중"));
-  try {
-    const results = await Promise.all([...state.selectedRuns].map(id => api(`/api/runs/${encodeURIComponent(id)}`)));
-    if (results.some(temporaryRun)) {
-      showMessage("#comparison-warning", msg("임시 품질 만점 기록이 포함되어 있어 성능을 비교할 수 없습니다. 해당 기록을 실제 LLM 또는 사람이 검수한 뒤 비교하세요."), "warning");
-      $("#comparison-table").replaceChildren(tag(msg("비교 제외 · 임시 점수"), "temporary"));
-      $("#comparison").hidden = false;
-      return;
-    }
-    const [left, right] = results.map(run => run.report);
-    const sameScope = JSON.stringify([...left.scope.paper_ids].sort()) === JSON.stringify([...right.scope.paper_ids].sort());
-    const comparable = sameScope && left.dataset_version === right.dataset_version && left.metrics_version === right.metrics_version && left.quality_policy_version === right.quality_policy_version;
-    const warnings = [];
-    if (!comparable) warnings.push(msg("평가 데이터 버전, 지표·검수 규칙 버전 또는 대상 논문이 서로 다릅니다. 아래 수치는 참고용이며 동일 조건의 성능 비교로 해석할 수 없습니다."));
-    if (results.some(run => run.is_demo)) warnings.push(msg("직접 작성한 형식 예제가 포함되어 있습니다. 실제 생성 모델의 성능 비교가 아닙니다."));
-    if (results.some(run => run.report.metrics.final_score == null)) warnings.push(msg("검수가 미완료되었거나 최종 점수를 정의할 수 없는 평가가 포함되어 있습니다."));
-    showMessage("#comparison-warning", I18n.join(warnings, "\n"), "warning");
-    const table = node("table"), head = node("thead"), header = node("tr"); header.append(node("th", "", () => msg("비교 항목"))); results.forEach(run => header.append(node("th", "", () => run.name, true))); head.append(header); table.append(head);
-    const rows = [[msg("평가 대상"), report => msg("{0} · {1}편", scopeLabels[report.scope.name] || report.scope.name, report.scope.paper_count)], [msg("데이터 버전"), report => String(report.dataset_version).slice(0, 12)], [msg("채점 기준 버전"), report => scoringRule(report.metrics_version).version], [msg("검수 기준"), report => report.quality_policy_version || msg("이전 기준")], [msg("최종 점수 계산식"), report => scoringRule(report.metrics_version).formula], ["Recall", report => percent(report.metrics.recall_pct)], [msg("일치 문항 통과율 / 품질"), report => percent(report.metrics.quality_matched_pct)], ["Precision", report => percent(report.metrics.precision_pct)], [msg("F1 · 보조 지표"), report => percent(report.metrics.f1_pct)], [msg("전체 문항 통과율 / 품질"), report => percent(report.metrics.quality_all_pct)], [msg("원문 일치 유일률 (코드)"), report => percent(report.metrics.source_unique_answer_rate_pct)], [msg("단일 정답률 (의미 검수)"), report => percent(report.metrics.unique_answer_rate_pct)], [msg("논문 제출률"), report => percent(report.metrics.coverage_pct)], [msg("최종 점수"), report => percent(report.metrics.final_score, " / 100")]];
-    const body = node("tbody"); rows.forEach(([label, getter]) => { const row = node("tr"); row.append(node("td", "", () => label)); results.forEach(run => row.append(node("td", "table-number", () => getter(run.report)))); body.append(row); }); table.append(body);
-    $("#comparison-table").replaceChildren(table); $("#comparison").hidden = false; $("#comparison").scrollIntoView({ behavior: "smooth", block: "start" });
-  } catch (error) { toast((error.uiMessage || error.message)); }
-  finally { setBusy(button, false); }
-}
-
 function openReview(paper, item) {
   state.review = { paper, item, runId: state.run.id };
   const form = $("#review-form"); form.reset();
@@ -568,17 +533,14 @@ async function submitReview(event) {
 }
 
 async function loadDataset() {
-  const sequence = ++state.datasetSequence;
-  const scope = $("#dataset-scope").value;
-  const params = new URLSearchParams({ scope, q: $("#dataset-search").value.trim(), offset: state.datasetPage * PAGE_SIZE, limit: PAGE_SIZE });
+  // Two public examples with reference expressions illustrate what to extract.
+  const sequence = ++state.datasetSequence, scope = "demo";
   const container = $("#dataset-list");
   try {
-    const result = await api(`/api/papers?${params}`);
+    const result = await api(`/api/papers?${new URLSearchParams({ scope, limit: PAGE_SIZE })}`);
     if (sequence !== state.datasetSequence) return;
-    state.datasetTotal = result.total; container.replaceChildren();
-    I18n.setText($("#dataset-count"), () => msg("{0} {1}편", scopeLabels[scope], number(result.total)));
-    if (!result.items.length) container.append(empty(msg("검색 결과가 없습니다"), msg("다른 논문명, 분야 또는 ID로 검색해보세요.")));
-    result.items.forEach(paper => {
+    container.replaceChildren();
+    result.items.filter(paper => paper.gold_count > 0).slice(0, 2).forEach(paper => {
       const details = node("details", "dataset-paper"), summary = node("summary"), copy = node("div", "paper-summary-copy");
       copy.append(node("div", "paper-summary-title", () => paper.paper_name || paper.paper_id, true));
       copy.append(node("div", "paper-summary-meta", () => `${paper.paper_id} · ${displayDomain(paper.domain)}`));
@@ -598,17 +560,13 @@ async function loadDataset() {
           (expressions || []).forEach(expression => {
             const entry = node("div", "label-entry");
             if (typeof expression === "string") entry.append(node("strong", "", () => expression, true));
-            else { entry.append(node("strong", "", () => expression.text, true), tag(expression.expression_type || "expression"), node("p", "", () => expression.reason || "", true)); if (expression.canonical_form) entry.append(node("p", "", () => msg("대표 형태 · {0}", expression.canonical_form))); }
+            else entry.append(node("strong", "", () => expression.text, true), node("p", "", () => expression.reason || "", true));
             body.append(entry);
           }); loaded = true;
         } catch (error) { body.replaceChildren(node("p", "notice error", () => I18n.join([(error.uiMessage || error.message), msg(" 닫았다 다시 열어 재시도하세요.")]))); }
         finally { loading = false; }
       }); container.append(details);
     });
-    const pages = Math.max(1, Math.ceil(result.total / PAGE_SIZE));
-    I18n.setText($("#dataset-page-label"), () => `${state.datasetPage + 1} / ${pages}`);
-    $("#dataset-prev").disabled = state.datasetPage === 0;
-    $("#dataset-next").disabled = state.datasetPage >= pages - 1;
   } catch (error) { if (sequence === state.datasetSequence) container.replaceChildren(empty(msg("데이터를 불러오지 못했습니다"), (error.uiMessage || error.message))); }
 }
 
@@ -632,15 +590,9 @@ function bindEvents() {
   $("#report-prev").addEventListener("click", () => { state.reportPage--; renderPapers(); });
   $("#report-next").addEventListener("click", () => { state.reportPage++; renderPapers(); });
   $("#refresh-history").addEventListener("click", loadHistory);
-  $("#compare-button").addEventListener("click", compareRuns);
   $("#review-close").addEventListener("click", () => $("#review-dialog").close());
   $("#review-form").addEventListener("submit", submitReview);
   $("#review-form").addEventListener("change", event => { if (event.target.name === "accepted_option" || event.target.name in rubricLabels || ["context_sufficient", "no_specialist_knowledge", "no_answer_leak"].includes(event.target.name)) updateReviewPreview(); });
-  let searchTimer;
-  $("#dataset-scope").addEventListener("change", () => { clearTimeout(searchTimer); state.datasetPage = 0; loadDataset(); });
-  $("#dataset-search").addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => { state.datasetPage = 0; loadDataset(); }, 280); });
-  $("#dataset-prev").addEventListener("click", () => { state.datasetPage--; loadDataset(); });
-  $("#dataset-next").addEventListener("click", () => { state.datasetPage++; loadDataset(); });
   $("#auth-button").addEventListener("click", async () => {
     if (state.session?.authenticated && state.session?.can_manage) {
       try { await api("/api/logout", { method: "POST", body: "{}" }); clearTimeout(state.pollTimer); clearTimeout(state.judgeStatusTimer); state.run = null; $("#report-section").hidden = true; await initialize(); toast(msg("로그아웃했습니다.")); }

@@ -25,11 +25,11 @@ def read_download(client, scope, kind):
     assert response.headers["content-type"].startswith("application/x-ndjson")
     assert "attachment" in response.headers["content-disposition"]
     assert response.headers["x-dataset-version"] == client.app.state.dataset.version
-    assert response.headers["x-split-version"] == "evaluation-min5sentences-v3"
+    assert response.headers["x-split-version"] == "evaluation-min5sentences-v4"
     return [json.loads(line) for line in response.text.splitlines()]
 
 
-@pytest.mark.parametrize("scope, count", [("demo", 3), ("evaluation", 1044)])
+@pytest.mark.parametrize("scope, count", [("demo", 2), ("evaluation", 1044)])
 def test_papers_are_complete_source_subsets_without_labels(client, scope, count):
     dataset = client.app.state.dataset
     papers = read_download(client, scope, "papers")
@@ -85,24 +85,23 @@ def test_example_answers_cover_all_example_labels_and_are_valid_submissions(clie
     assert client.get("/api/runs").json()["items"] == []  # Downloading never starts inference.
 
 
-def test_manifest_and_explorer_use_only_new_scopes(client):
-    manifest = client.get("/api/splits?download=1").json()
-    assert manifest["split_version"] == "evaluation-min5sentences-v3"
-    assert manifest["example_answers"]["quality_status"] == "code-checked"
-    assert manifest["example_answers"]["semantic_reviewed"] is False
-    assert manifest["evaluation_filter"]["minimum_sentences"] == 5
-    assert manifest["evaluation_filter"]["excluded_paper_count"] == 443
-    assert set(manifest["evaluation_sentence_counts"]) == set(manifest["splits"]["evaluation"])
-    assert all(count >= 5 for count in manifest["evaluation_sentence_counts"].values())
+def test_split_manifest_download_is_removed_and_explorer_uses_only_new_scopes(client):
+    assert client.get("/api/splits").status_code == 404
+    assert client.get("/api/splits?download=1").status_code == 404
+    dataset = client.app.state.dataset
+    manifest = {"splits": dataset.splits}
+    assert dataset.evaluation_filter["minimum_sentences"] == 5
+    assert dataset.evaluation_filter["excluded_paper_count"] == 444
+    assert all(dataset.sentence_counts[pid] >= 5 for pid in dataset.splits["evaluation"])
     assert client.get("/api/schema").json()["scopes"] == ["demo", "evaluation"]
     assert set(manifest["splits"]) == {"demo", "evaluation"}
-    assert len(manifest["splits"]["demo"]) == 3
+    assert len(manifest["splits"]["demo"]) == 2
     assert not set(manifest["splits"]["demo"]) & set(manifest["splits"]["evaluation"])
-    assert client.get("/api/papers").json()["total"] == 3
-    for scope, count in (("demo", 3), ("evaluation", 1044)):
-        response = client.get("/api/papers", params={"scope": scope, "limit": 100, "offset": count - 3}).json()
+    assert client.get("/api/papers").json()["total"] == 2
+    for scope, count in (("demo", 2), ("evaluation", 1044)):
+        response = client.get("/api/papers", params={"scope": scope, "limit": 100, "offset": count - 2}).json()
         assert response["total"] == count
-        assert len(response["items"]) == 3
+        assert len(response["items"]) == 2
         assert all(row["paper_id"] in manifest["splits"][scope] for row in response["items"])
         pid = response["items"][0]["paper_id"]
         detail = client.get(f"/api/papers/{pid}").json()
@@ -177,7 +176,7 @@ def test_evaluation_scope_rejects_example_papers_and_cannot_shrink_denominator(c
     report = result.json()["report"]
     assert report["scope"]["paper_count"] == report["counts"]["missing_papers"] == 1044
     assert report["counts"]["gold"] == sum(len(dataset.labels[pid]) for pid in dataset.splits["evaluation"])
-    assert report["split_version"] == "evaluation-min5sentences-v3"
+    assert report["split_version"] == "evaluation-min5sentences-v4"
     assert report["metrics"]["final_score"] == 0
 
 
