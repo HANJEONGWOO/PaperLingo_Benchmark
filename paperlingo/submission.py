@@ -16,6 +16,8 @@ from .dataset import occurrences
 
 
 COMPACT_FIELDS = {"expression_text", "options", "answer_id"}
+# Matches Dataset.MAX_REFERENCE_EXPRESSIONS so every reference can be answered.
+MAX_QUESTIONS_PER_PAPER = 10
 LEGACY_FIELDS = {
     "question_id", "expression_type", "expression_span", "context_span",
     "blank_span", "learning_point",

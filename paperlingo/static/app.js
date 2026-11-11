@@ -31,6 +31,7 @@ function codeRun(run) { const report = run?.report || run; return report?.qualit
 function referenceCount(paper) { return paper.reference_hidden ? paper.gold_count : (paper.gold_expressions || []).length; }
 function missingCount(paper) { return paper.reference_hidden ? paper.missing_count : (paper.missing_expressions || []).length; }
 function scoringRule(version) {
+  if (version === "soft-rq-v4") return { version, label: "v4", formula: "100 × Rsoft × Qmatched", legacy: false, soft: true };
   if (version === "exact-rq-v3") return { version, label: "v3", formula: "100 × R × Qmatched", legacy: false };
   if (["exact-prq-v1", "exact-prq-v2"].includes(version)) return { version, label: version.endsWith("v1") ? "v1" : "v2", formula: "100 × P × R × Qmatched", legacy: true };
   return { version: version || msg("버전 정보 없음"), label: msg("이전 계산식"), formula: "100 × P × R × Qmatched", legacy: true };
@@ -246,8 +247,12 @@ function renderReport() {
   I18n.setText($("#skip-judge-help"), () => msg("구조가 유효한 모든 문항의 Q를 100%로 처리합니다(기존 검수 포함). 이 기록의 최종 점수는 {0}이며 검증된 성능이 아닙니다.", rule.formula));
   if (temporary) I18n.setText($("#temporary-count"), () => msg("{0}개 문항의 품질을 검수 없이 100%로 임시 처리했습니다. 구조 오류는 0점이며 최종 점수는 {1}로 계산합니다({2}). 검증된 성능이 아니므로 일반 평가와 비교할 수 없습니다.", number(temporaryCount), rule.formula, rule.version));
   const cards = $("#metric-cards"); cards.replaceChildren(
-    metricCard(msg("Recall · 표현 재현율"), metrics.recall_pct, msg("{0}개 일치 / {1}개 실제 참조", number(counts.matched), number(counts.gold))),
-    metricCard(rule.legacy ? msg("Precision · 선정 정확도") : msg("Precision · 보조 지표"), metrics.precision_pct, msg("{0}개 일치 / {1}개 생성", number(counts.matched), number(counts.predicted))),
+    rule.soft
+      ? metricCard(msg("Recall · 부분 점수 포함"), metrics.recall_pct, msg("정확 {0} + 부분 {1} = {2}점 / {3}개 실제 참조", number(counts.exact_matched), number(counts.partial_matched), number(counts.credited_matches), number(counts.gold)))
+      : metricCard(msg("Recall · 표현 재현율"), metrics.recall_pct, msg("{0}개 일치 / {1}개 실제 참조", number(counts.matched), number(counts.gold))),
+    rule.soft
+      ? metricCard(msg("Precision · 보조 지표"), metrics.precision_pct, msg("{0}점 / {1}개 생성", number(counts.credited_matches), number(counts.predicted)))
+      : metricCard(rule.legacy ? msg("Precision · 선정 정확도") : msg("Precision · 보조 지표"), metrics.precision_pct, msg("{0}개 일치 / {1}개 생성", number(counts.matched), number(counts.predicted))),
     metricCard(msg("F1 · 보조 지표"), metrics.f1_pct, msg("Precision과 Recall의 조화평균")),
     metricCard(code ? msg("Q · 일치 문항 통과율") : temporary ? msg("Q · 일치 문항 품질 (임시)") : msg("Q · 일치 문항 품질"), metrics.quality_matched_pct, code ? msg("참조 라벨과 일치한 문항 중 검사 통과 비율") : temporary ? msg("검수 없이 만점 처리한 문항 포함") : msg("참조 라벨과 일치한 문항의 평균"), false, unresolved > 0 && counts.matched > 0),
     metricCard(temporary ? msg("최종 점수 · 임시") : rule.legacy ? msg("최종 점수 · 이전 기준") : msg("최종 점수"), metrics.final_score, msg("{0}{1}", temporary ? msg("검증 전 임시값 · ") : "", rule.formula), true, unresolved > 0, "/ 100")
@@ -367,7 +372,9 @@ function renderQuestion(paper, item) {
   const heading = node("div", "question-heading"), title = node("div");
   const questionLabel = item.input_format === "compact-v1" ? msg("문항 {0}", item.inference.question_position) : `${item.question_id}${item.expression_type ? ` · ${item.expression_type}` : ""}`;
   title.append(node("span", "question-ident", () => questionLabel), node("h3", "question-title", () => item.expression_text, true));
-  const badges = node("div", "question-badges"); badges.append(tag(item.matched ? msg("라벨 일치") : msg("라벨 불일치"), item.matched ? "success" : "warning"));
+  const badges = node("div", "question-badges"); const partial = item.matched && item.match_credit != null && item.match_credit < 1;
+  badges.append(tag(partial ? msg("부분 일치 {0}", percent(item.match_credit * 100)) : item.matched ? msg("라벨 일치") : msg("라벨 불일치"), item.matched && !partial ? "success" : "warning"));
+  if (partial && item.matched_expression) badges.append(tag(msg("참조: {0}", item.matched_expression)));
   if (!item.structure_valid) badges.append(tag(msg("구조 오류"), "error"));
   const quality = item.quality || { status: "pending" };
   badges.append(quality.source === "code" ? tag(quality.result === "pass" ? msg("검사 통과") : msg("검사 실패"), quality.result === "pass" ? "success" : "error") : quality.source === "temporary" ? tag(msg("품질 {0} · 임시", percent(quality.q == null ? null : quality.q * 100)), "temporary") : quality.status === "complete" ? tag(msg("품질 {0}", percent(quality.q == null ? null : quality.q * 100)), quality.q > 0 ? "success" : "warning") : statusTag(quality.status));

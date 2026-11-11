@@ -63,9 +63,9 @@ def review_payload(paper, item, **updates):
 def test_dataset_and_sample_are_real(client):
     config = client.get("/api/config").json()
     assert config["dataset"]["paper_count"] == 1490
-    assert config["dataset"]["expression_count"] == 6188
+    assert config["dataset"]["expression_count"] == 6853
     assert config["dataset"]["split_stats"]["evaluation"] == {
-        "paper_count": 1044, "expression_count": 4832, "domain_count": 147,
+        "paper_count": 1044, "expression_count": 5497, "domain_count": 147,
     }
     assert config["judge"]["configured"] is False
     assert client.get("/api/papers?q=0911.3369").json()["total"] == 1

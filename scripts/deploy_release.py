@@ -23,7 +23,8 @@ from urllib.request import urlopen
 
 RELEASE_FILES = (
     "requirements.txt", "paperlingo", "prompts", "data/abstract_data.jsonl",
-    "data/abstract_labels_v2.jsonl", "data/labeling_prompt_v2.md",
+    "data/abstract_labels_v2.jsonl", "data/paperlingo-evaluation-labels-1044-grammar.jsonl",
+    "data/labeling_prompt_v2.md",
 )
 
 

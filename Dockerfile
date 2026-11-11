@@ -12,7 +12,7 @@ RUN pip install --no-cache-dir -r requirements.txt \
 
 COPY --chown=paperlingo:paperlingo paperlingo/ ./paperlingo/
 COPY --chown=paperlingo:paperlingo prompts/ ./prompts/
-COPY --chown=paperlingo:paperlingo data/abstract_data.jsonl data/abstract_labels_v2.jsonl data/labeling_prompt_v2.md ./data/
+COPY --chown=paperlingo:paperlingo data/abstract_data.jsonl data/abstract_labels_v2.jsonl data/paperlingo-evaluation-labels-1044-grammar.jsonl data/labeling_prompt_v2.md ./data/
 RUN mkdir -p /app/runtime && chown paperlingo:paperlingo /app/runtime
 
 USER paperlingo

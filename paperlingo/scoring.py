@@ -1,4 +1,4 @@
-"""Deterministic exact-expression scoring and question integrity checks.
+"""Deterministic expression scoring (exact plus partial credit) and question integrity checks.
 
 Quality judgements are separate from expression matching. This module never
 assigns an LLM quality score or silently removes a failed generated question.
@@ -8,13 +8,37 @@ from __future__ import annotations
 
 from copy import deepcopy
 import math
+import re
 
 from .dataset import Dataset, domain_code, occurrences, word_boundary
 from .code_review import CODE_REVIEW_POLICY, code_quality, normalize_option
-from .submission import COMPACT_FIELDS, INFERENCE_POLICY, generated_question_id, normalize_question, question_format
+from .submission import COMPACT_FIELDS, INFERENCE_POLICY, MAX_QUESTIONS_PER_PAPER, generated_question_id, normalize_question, question_format
 
 
-METRICS_VERSION = "exact-rq-v3"
+METRICS_VERSION = "soft-rq-v4"
+# Partial credit compares word tokens at their positions in the source abstract.
+# Function-word weighting follows tests/soft_match.py; positions replace its lemmas.
+FUNCTION_WEIGHT = 0.3
+FUNCTION_WORDS = frozenset("""
+a an the this that these those such
+of in on at to for from by with about as into onto upon within without
+through over under between among against during before after above below
+and or but nor so yet if than then because while whereas although though
+is am are was were be been being have has had do does did
+it its they them their we our us he she his her i you your
+which who whom whose what where when how there here
+not no can could may might must shall should will would
+also very more most less least much many some any each every all both
+""".split())
+MATCH_POLICY = {
+    "version": "weighted-span-jaccard-v2",
+    "unit": "word tokens at their positions in the abstract; function words weigh 0.3, others 1.0",
+    "credit": "w(submitted ∩ reference) / w(submitted ∪ reference); exact text = 1.0",
+    "case": "ignored for exact and partial matching",
+    "guard": "no credit unless the overlap has a content word, spans two or more words, or contains the whole reference",
+    "assignment": "one-to-one; exact text first, then the assignment maximizing total credit",
+}
+_TOKEN = re.compile(r"\w+(?:[-'’]\w+)*")
 QUALITY_POLICY_VERSION = "auto-conservative-v1"
 QUESTION_FIELDS = {
     "question_id", "expression_text", "expression_type", "expression_span",
@@ -86,8 +110,8 @@ def _fatal_validation(dataset: Dataset, predictions: list[dict], paper_ids: list
         if not isinstance(questions, list):
             errors.append(f"{prefix}: questions 배열이 필요합니다.")
             continue
-        if len(questions) > 5:
-            errors.append(f"{prefix}: 논문당 문항은 최대 5개입니다. 임의로 잘라내지 않습니다.")
+        if len(questions) > MAX_QUESTIONS_PER_PAPER:
+            errors.append(f"{prefix}: 논문당 문항은 최대 {MAX_QUESTIONS_PER_PAPER}개입니다. 임의로 잘라내지 않습니다.")
         for position, question in enumerate(questions):
             label = f"{prefix}.questions[{position}]"
             if not isinstance(question, dict):
@@ -207,6 +231,80 @@ def _validate_item(question: dict, abstract: str, *, duplicate: bool, initial_is
     return item
 
 
+def _tokens(abstract: str) -> tuple[list[tuple[int, int]], list[float]]:
+    spans = [match.span() for match in _TOKEN.finditer(abstract)]
+    weights = [FUNCTION_WEIGHT if abstract[a:b].casefold() in FUNCTION_WORDS else 1.0 for a, b in spans]
+    return spans, weights
+
+
+def _occurrences_ignoring_case(abstract: str, text: str) -> list[tuple[int, int]]:
+    """Whole-word spans of text in the abstract, ignoring case (overlaps allowed)."""
+    if not text.strip():
+        return []
+    pattern = re.compile(f"(?=({re.escape(text)}))", re.IGNORECASE)
+    return [match.span(1) for match in pattern.finditer(abstract) if word_boundary(abstract, *match.span(1))]
+
+
+def _token_sets(abstract: str, spans: list[tuple[int, int]], text: str) -> list[frozenset[int]]:
+    """Token indices covered by each whole-word occurrence of text, ignoring case."""
+    found = []
+    for start, end in _occurrences_ignoring_case(abstract, text):
+        covered = frozenset(index for index, (a, b) in enumerate(spans) if a < end and b > start)
+        if covered and covered not in found:
+            found.append(covered)
+    return found
+
+
+def match_credit(submitted: list[frozenset[int]], reference: list[frozenset[int]], weights: list[float]) -> tuple[float, str | None]:
+    """Best weighted token Jaccard over occurrence pairs and how the spans relate.
+
+    A longer submission containing the reference loses credit for the extra
+    words (w(ref) / w(sub)); a shorter one inside it earns its share
+    (w(sub) / w(ref)). A lone shared function word earns nothing.
+    """
+    def weight(indices):
+        return sum(weights[index] for index in indices)
+
+    best, kind = 0.0, None
+    for sub in submitted:
+        for ref in reference:
+            overlap = sub & ref
+            if not overlap:
+                continue
+            if not (len(overlap) >= 2 or ref <= sub or any(weights[index] == 1.0 for index in overlap)):
+                continue
+            credit = weight(overlap) / weight(sub | ref)
+            if credit > best:
+                best = credit
+                kind = "exact" if sub == ref else "superset" if ref <= sub else "subset" if sub <= ref else "overlap"
+    return best, kind
+
+
+def _best_assignment(credits: dict[tuple[int, int], tuple[float, str]]) -> list[tuple[int, int]]:
+    """Exact one-to-one assignment maximizing total credit (≤10 × 10, sparse).
+
+    Submissions are taken in order; ties keep the earlier-found assignment.
+    """
+    positions = sorted({position for position, _ in credits})
+    states = {frozenset(): (0.0, ())}
+    for position in positions:
+        following = dict(states)
+        for used, (total, pairs) in states.items():
+            for (candidate, order), (credit, _) in credits.items():
+                if candidate != position or order in used:
+                    continue
+                key, value = used | {order}, (total + credit, pairs + ((position, order),))
+                if key not in following or value[0] > following[key][0] + 1e-12:
+                    following[key] = value
+        states = following
+    best = max(states.values(), key=lambda state: state[0], default=(0.0, ()))
+    for state in states.values():  # deterministic tie-break: first-found maximum
+        if abs(state[0] - best[0]) <= 1e-12:
+            best = state
+            break
+    return list(best[1])
+
+
 def evaluate(dataset: Dataset, predictions: list[dict], paper_ids: list[str], scope_name: str) -> dict:
     """Score a fixed scope; missing papers remain in the reference denominator."""
     _fatal_validation(dataset, predictions, paper_ids, scope_name)
@@ -225,8 +323,16 @@ def evaluate(dataset: Dataset, predictions: list[dict], paper_ids: list[str], sc
         paper = dataset.papers[paper_id]
         gold = [expression["text"] for expression in dataset.labels[paper_id]]
         remaining = set(gold)
+        # Matching ignores case: selecting the right words is what is scored.
+        gold_by_key = {}
+        for text in gold:
+            gold_by_key.setdefault(text.casefold(), text)
         seen = set()
         items = []
+        abstract = paper["abstract"]
+        spans, weights = _tokens(abstract)
+        gold_tokens = {text: _token_sets(abstract, spans, text) for text in gold}
+        partial_positions = []
         for position, raw_question in enumerate(predictions_by_id.get(paper_id, {}).get("questions", [])):
             question, normalization_issues = normalize_question(raw_question, paper["abstract"], paper_id, position)
             formats.add(question["input_format"])
@@ -235,10 +341,29 @@ def evaluate(dataset: Dataset, predictions: list[dict], paper_ids: list[str], sc
             seen.add(text)
             item = _validate_item(question, paper["abstract"], duplicate=duplicate, initial_issues=normalization_issues)
             # A bad span or option does not undo a correct expression selection.
-            item["matched"] = bool(not duplicate and text in remaining and occurrences(paper["abstract"], text, whole_words=True))
-            if item["matched"]:
-                remaining.remove(text)
+            reference = gold_by_key.get(text.casefold())
+            exact = bool(not duplicate and reference in remaining and gold_tokens[reference]
+                         and _token_sets(abstract, spans, text))
+            item.update(matched=exact, match_credit=1.0 if exact else 0.0,
+                        match_type="exact" if exact else None, matched_expression=reference if exact else None)
+            if exact:
+                remaining.remove(reference)
+            elif not duplicate:
+                partial_positions.append(position)
             items.append(item)
+        # Partial credit for the rest: each reference and submission is used once.
+        credits = {}
+        for position in partial_positions:
+            submitted = _token_sets(abstract, spans, items[position]["expression_text"])
+            for order, text in enumerate(gold):
+                if text in remaining:
+                    credit, kind = match_credit(submitted, gold_tokens[text], weights)
+                    if credit > 0:
+                        credits[(position, order)] = (credit, kind)
+        for position, order in _best_assignment(credits):
+            credit, kind = credits[(position, order)]
+            items[position].update(matched=True, match_credit=round(credit, 6), match_type=kind, matched_expression=gold[order])
+            remaining.discard(gold[order])
         report["papers"].append({
             "paper_id": paper_id,
             "paper_name": paper.get("paper_name", paper_id),
@@ -249,6 +374,7 @@ def evaluate(dataset: Dataset, predictions: list[dict], paper_ids: list[str], sc
             "missing_expressions": [text for text in gold if text in remaining],
             "items": items,
         })
+    report["match_policy"] = deepcopy(MATCH_POLICY)
     report["submission_formats"] = sorted(formats)
     if "compact-v1" in formats:
         report["inference_policy"] = deepcopy(INFERENCE_POLICY)
@@ -271,7 +397,9 @@ def _percentage(value: float | None) -> float | None:
 def recompute(report: dict) -> dict:
     """Recompute using the report's saved metric version, keeping matches fixed.
 
-    V3 uses Recall × matched quality. Earlier or unversioned reports retain
+    V4 weights every credited question by its match credit (exact = 1, partial
+    = token Jaccard): final = Σ credit × q / references = R_soft × Q_matched.
+    V3 uses exact Recall × matched quality. Earlier or unversioned reports retain
     Precision × Recall × matched quality; recomputation never migrates them.
     """
     papers = report["papers"]
@@ -285,9 +413,16 @@ def recompute(report: dict) -> dict:
         # Structural failures cannot be overridden by human or model reviews.
         if not item.get("structure_valid") and not code_only:
             item["quality"] = empty_quality(structural=True)
-    matched_items = [item for item in items if item["matched"]]
+    soft = report.get("metrics_version") == "soft-rq-v4"
+
+    def credit(item: dict) -> float:
+        return float(item.get("match_credit", 1.0 if item["matched"] else 0.0)) if soft else float(bool(item["matched"]))
+
+    matched_items = [item for item in items if credit(item) > 0]
     gold = sum(len(paper["gold_expressions"]) for paper in papers)
     predicted, matched = len(items), len(matched_items)
+    exact_matched = sum(credit(item) == 1.0 for item in matched_items)
+    credited = sum(credit(item) for item in matched_items)
     submitted = sum(paper["submitted"] for paper in papers)
     complete = sum(_complete(item) for item in items)
     errors = sum(item["quality"].get("status") == "error" for item in items)
@@ -298,15 +433,18 @@ def recompute(report: dict) -> dict:
     all_done = complete == predicted
     matched_done = all(_complete(item) for item in matched_items)
 
-    precision = matched / predicted if predicted else 0.0
-    recall = matched / gold if gold else None
-    f1 = 2 * matched / (predicted + gold) if predicted + gold else None
+    precision = credited / predicted if predicted else 0.0
+    recall = credited / gold if gold else None
+    f1 = 2 * credited / (predicted + gold) if predicted + gold else None
     quality_all = sum(item["quality"]["q"] for item in items) / predicted if all_done and predicted else None
-    quality_matched = sum(item["quality"]["q"] for item in matched_items) / matched if matched_done and matched else None
+    quality_matched = (
+        sum(credit(item) * item["quality"]["q"] for item in matched_items) / credited
+        if matched_done and matched else None
+    )
     final = None
     if all_done and gold:
         final = recall * quality_matched if matched else 0.0
-        if report.get("metrics_version") != "exact-rq-v3":
+        if report.get("metrics_version") not in ("exact-rq-v3", "soft-rq-v4"):
             final *= precision
 
     def unique_answer(item: dict) -> bool:
@@ -327,6 +465,9 @@ def recompute(report: dict) -> dict:
         "gold": gold,
         "predicted": predicted,
         "matched": matched,
+        "exact_matched": exact_matched,
+        "partial_matched": matched - exact_matched,
+        "credited_matches": round(credited, 6),
         "submitted_papers": submitted,
         "missing_papers": len(papers) - submitted,
         "quality_complete": complete,
@@ -343,6 +484,7 @@ def recompute(report: dict) -> dict:
     report["metrics"] = {
         "precision_pct": _percentage(precision),
         "recall_pct": _percentage(recall),
+        "exact_recall_pct": _percentage(exact_matched / gold if gold else None),
         "f1_pct": _percentage(f1),
         "quality_all_pct": _percentage(quality_all),
         "quality_matched_pct": _percentage(quality_matched),

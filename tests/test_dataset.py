@@ -17,13 +17,13 @@ def test_real_reference_integrity_and_splits():
     dataset = Dataset(DATA_DIR)
     summary = dataset.summary()
     assert summary["paper_count"] == 1490
-    assert summary["expression_count"] == 6188
+    assert summary["expression_count"] == 6853
     assert summary["domain_count"] == 149
-    assert summary["zero_gold_count"] == 12
+    assert summary["zero_gold_count"] == 23
     assert summary["splits"] == {"demo": 3, "evaluation": 1044}
     assert summary["split_stats"] == {
         "demo": {"paper_count": 3, "expression_count": 9, "domain_count": 2},
-        "evaluation": {"paper_count": 1044, "expression_count": 4832, "domain_count": 147},
+        "evaluation": {"paper_count": 1044, "expression_count": 5497, "domain_count": 147},
     }
     assert summary["split_version"] == Dataset.SPLIT_VERSION == "evaluation-min5sentences-v3"
     assert len(dataset.version) == 64
@@ -39,7 +39,7 @@ def test_real_reference_integrity_and_splits():
     assert dataset.splits["demo"] == ["0911.3369", "1109.3182", "1709.01217"]
     assert set(dataset.splits["demo"]) <= partitions[0]
     assert not set(dataset.splits["demo"]) & partitions[1]
-    assert sum(len(dataset.labels[pid]) for pid in dataset.splits["evaluation"]) == 4832
+    assert sum(len(dataset.labels[pid]) for pid in dataset.splits["evaluation"]) == 5497
     assert summary["evaluation_filter"] == {
         "minimum_sentences": 5, "sentence_policy_version": "abstract-sentences-v1",
         "source_paper_count": 1487, "eligible_paper_count": 1044, "excluded_paper_count": 443,
@@ -142,6 +142,19 @@ def test_bad_reference_fails_loudly(tmp_path, case):
         Dataset(tmp_path)
 
 
+@pytest.mark.parametrize("count, ok", [(10, True), (11, False)])
+def test_reference_expression_limit_is_ten(tmp_path, count, ok):
+    words = [f"w{index}" for index in range(11)]
+    papers = [{"paper_id": "p", "abstract": " ".join(words) + "."}]
+    labels = [{"paper_id": "p", "expressions": [{"text": word} for word in words[:count]]}]
+    write_fixture(tmp_path, papers, labels)
+    if ok:
+        assert len(Dataset(tmp_path).labels["p"]) == 10
+    else:
+        with pytest.raises(DatasetError):
+            Dataset(tmp_path)
+
+
 def test_dataset_version_changes_with_label_edits(tmp_path):
     papers = [{"paper_id": "p", "abstract": "A valuable result."}]
     labels = [{"paper_id": "p", "expressions": [{"text": "valuable"}]}]
@@ -153,6 +166,8 @@ def test_dataset_version_changes_with_label_edits(tmp_path):
 
 
 def test_split_configuration_does_not_change_source_dataset_version(monkeypatch):
+    # The grammar answer key is tied to the current split, so compare without it.
+    monkeypatch.setattr(Dataset, "EVALUATION_LABELS_FILE", "absent-evaluation-labels.jsonl")
     original = Dataset(DATA_DIR)
     monkeypatch.setattr(Dataset, "EXAMPLE_PAPER_IDS", ("2208.09462", "1109.3182", "1709.01217"))
     monkeypatch.setattr(Dataset, "SPLIT_VERSION", "test-alternate-policy")
@@ -190,6 +205,63 @@ def test_tiny_dataset_keeps_public_examples_out_of_evaluation(tmp_path):
     write_fixture(tmp_path, papers, labels)
     dataset = Dataset(tmp_path)
     assert dataset.splits == {"demo": ["p"], "evaluation": []}
+
+
+def test_real_evaluation_labels_come_from_grammar_answer_key():
+    dataset = Dataset(DATA_DIR)
+    rows = [json.loads(line) for line in (DATA_DIR / Dataset.EVALUATION_LABELS_FILE).read_text().splitlines() if line.strip()]
+    assert [row["paper_id"] for row in rows] == dataset.splits["evaluation"]
+    assert all(dataset.labels[row["paper_id"]] == row["expressions"] for row in rows)
+    assert dataset.summary()["label_sources"] == {
+        "default": "abstract_labels_v2.jsonl", "evaluation": Dataset.EVALUATION_LABELS_FILE,
+    }
+
+
+FIVE_SENTENCES = ("We report a valuable result. The method is simple. The data are public. "
+                  "The code is released. The results are robust.")
+
+
+def write_override_fixture(tmp_path, override):
+    papers = [{"paper_id": pid, "abstract": FIVE_SENTENCES} for pid in ("d1", "d2", "d3", "e1", "e2")]
+    labels = [{"paper_id": paper["paper_id"], "expressions": [{"text": "valuable"}]} for paper in papers]
+    write_fixture(tmp_path, papers, labels)
+    (tmp_path / Dataset.EVALUATION_LABELS_FILE).write_text("\n".join(json.dumps(row) for row in override))
+
+
+def test_evaluation_label_file_replaces_only_evaluation_labels(tmp_path):
+    write_override_fixture(tmp_path, [])
+    (tmp_path / Dataset.EVALUATION_LABELS_FILE).unlink()
+    without = Dataset(tmp_path)
+    evaluation = without.splits["evaluation"]
+    assert len(evaluation) == 2
+    override = [{"paper_id": evaluation[0], "expressions": [{"text": "result"}]},
+                {"paper_id": evaluation[1], "expressions": []}]
+    write_override_fixture(tmp_path, override)
+    dataset = Dataset(tmp_path)
+    assert dataset.splits == without.splits
+    assert dataset.version != without.version
+    assert dataset.labels[evaluation[0]] == [{"text": "result"}]
+    assert dataset.labels[evaluation[1]] == []
+    assert all(dataset.labels[pid] == [{"text": "valuable"}] for pid in dataset.splits["demo"])
+
+
+@pytest.mark.parametrize("case", ["missing", "demo", "unknown", "absent_text"])
+def test_bad_evaluation_label_file_fails_loudly(tmp_path, case):
+    write_override_fixture(tmp_path, [])
+    (tmp_path / Dataset.EVALUATION_LABELS_FILE).unlink()
+    splits = Dataset(tmp_path).splits
+    override = [{"paper_id": pid, "expressions": [{"text": "valuable"}]} for pid in splits["evaluation"]]
+    if case == "missing":
+        override.pop()
+    elif case == "demo":
+        override.append({"paper_id": splits["demo"][0], "expressions": []})
+    elif case == "unknown":
+        override.append({"paper_id": "unknown", "expressions": []})
+    elif case == "absent_text":
+        override[0]["expressions"][0]["text"] = "invented"
+    write_override_fixture(tmp_path, override)
+    with pytest.raises(DatasetError):
+        Dataset(tmp_path)
 
 
 def test_search_returns_summary_not_entire_dataset():

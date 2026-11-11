@@ -43,8 +43,8 @@ def to_prediction(paper: dict, generated: dict) -> dict:
     if generated["paper_id"] != paper["paper_id"]:
         raise ValueError("Generator returned the wrong paper_id.")
     questions = generated["questions"]
-    if not isinstance(questions, list) or len(questions) > 5:
-        raise ValueError("Generator must return 0–5 questions.")
+    if not isinstance(questions, list) or len(questions) > 10:
+        raise ValueError("Generator must return 0–10 questions.")
     required = {"expression_text", "options", "answer_id"}
     converted = []
     for question in questions:

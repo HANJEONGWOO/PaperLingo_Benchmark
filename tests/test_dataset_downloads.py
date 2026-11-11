@@ -7,7 +7,7 @@ import pytest
 
 from paperlingo.app import create_app
 from paperlingo.config import Settings
-from paperlingo.scoring import evaluate
+from paperlingo.scoring import FUNCTION_WORDS, evaluate
 
 
 HEADERS = {"X-Requested-With": "PaperLingo"}
@@ -240,6 +240,29 @@ def test_evaluation_scoring_still_uses_private_reference_labels(client):
     assert paper["items"][0]["matched"] is True
     exported = client.get(f'/api/runs/{run["id"]}/export').json()["report"]
     assert exported == report
+
+
+def test_partial_matches_never_reveal_hidden_reference_text(client):
+    dataset = client.app.state.dataset
+    pid, expression = next(
+        (pid, item["text"]) for pid in dataset.splits["evaluation"] for item in dataset.labels[pid]
+        if len(item["text"].split()) >= 2 and item["text"].split()[0].lower() not in FUNCTION_WORDS
+    )
+    shorter = expression.split()[0]
+    question = {"expression_text": shorter, "options": [shorter, "zz1", "zz2", "zz3"], "answer_id": 0}
+    response = client.post("/api/runs", headers=HEADERS, json={
+        "name": "partial", "scope": "evaluation", "predictions": [{"paper_id": pid, "questions": [question]}],
+    })
+    assert response.status_code == 201
+    run = response.json()
+    paper = next(paper for paper in run["report"]["papers"] if paper["paper_id"] == pid)
+    item = paper["items"][0]
+    assert item["matched"] is True and 0 < item["match_credit"] < 1
+    assert "matched_expression" not in item
+    for fetched in (client.get(f'/api/runs/{run["id"]}').json(), client.get(f'/api/runs/{run["id"]}/export').json()):
+        paper = next(paper for paper in fetched["report"]["papers"] if paper["paper_id"] == pid)
+        assert "matched_expression" not in paper["items"][0]
+        assert "gold_expressions" not in paper and "missing_expressions" not in paper
 
 
 @pytest.mark.parametrize("old_scope", ["all", "train", "evaluation"])

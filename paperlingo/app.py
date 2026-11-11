@@ -25,6 +25,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from .config import Settings, ROOT
 from .code_review import CODE_REVIEW_POLICY
 from .dataset import Dataset
+from .submission import MAX_QUESTIONS_PER_PAPER
 from .judge import JudgeConfig, judge_item, quality_from_review, temporary_quality, QUALITY_POLICY_VERSION
 from .scoring import METRICS_VERSION, SubmissionError, evaluate, recompute
 from .storage import Store, now, report_status
@@ -147,6 +148,8 @@ def create_app(settings: Settings | None = None):
                 paper["reference_hidden"] = True
                 paper["gold_count"] = len(paper.pop("gold_expressions", []))
                 paper["missing_count"] = len(paper.pop("missing_expressions", []))
+                # Partial matches keep their credit but never name the hidden reference.
+                paper["items"] = [{k: v for k, v in item.items() if k != "matched_expression"} for item in paper["items"]]
             papers.append(paper)
         return {**run, "report": {**run["report"], "papers": papers}}
 
@@ -399,7 +402,7 @@ def create_app(settings: Settings | None = None):
             "version": VERSION,
             "submission_format": "compact-v1",
             "input": "논문별 객체의 JSON 배열 또는 JSONL",
-            "max_questions_per_paper": 5,
+            "max_questions_per_paper": MAX_QUESTIONS_PER_PAPER,
             "scopes": ["demo", "evaluation"],
             "scope_optional": True,
             "scope_selection": "automatic_when_omitted",
@@ -671,14 +674,14 @@ def create_app(settings: Settings | None = None):
             return Response(json.dumps(run, ensure_ascii=False, indent=2), media_type="application/json", headers={"Content-Disposition": f'attachment; filename="paperlingo-{run_id}.json"'})
         buffer = io.StringIO()
         writer = csv.writer(buffer)
-        writer.writerow(["paper_id", "question_id", "expression", "matched", "structure_valid", "quality_status", "quality_source", "quality_score_pct", "accepted_options", "answer_id", "issues", "rationale", "score_mode", "quality_policy", "metrics_version", "check_result", "option_format", "no_duplicates", "designated_answer", "unique_source_answer", "source_match_options"])
+        writer.writerow(["paper_id", "question_id", "expression", "matched", "match_type", "match_credit", "structure_valid", "quality_status", "quality_source", "quality_score_pct", "accepted_options", "answer_id", "issues", "rationale", "score_mode", "quality_policy", "metrics_version", "check_result", "option_format", "no_duplicates", "designated_answer", "unique_source_answer", "source_match_options"])
         for paper in run["report"]["papers"]:
             if not paper["items"]:
-                writer.writerow([csv_value(paper["paper_id"]), "", "", "", "", "empty_submission" if paper["submitted"] else "missing_submission"] + [""] * 6 + [run["report"].get("score_mode", "reviewed"), "", run["report"].get("metrics_version")] + [""] * 6)
+                writer.writerow([csv_value(paper["paper_id"]), "", "", "", "", "", "", "empty_submission" if paper["submitted"] else "missing_submission"] + [""] * 6 + [run["report"].get("score_mode", "reviewed"), "", run["report"].get("metrics_version")] + [""] * 6)
             for item in paper["items"]:
                 q = item["quality"]
                 checks = {check["key"]: check["passed"] for check in q.get("checks", [])}
-                writer.writerow([csv_value(x) for x in [paper["paper_id"], item["question_id"], item["expression_text"], item["matched"], item["structure_valid"], q["status"], q["source"], None if q["q"] is None else round(q["q"] * 100, 2), ",".join(q.get("accepted_option_ids", [])), item.get("answer_id", ""), "; ".join(i["message"] for i in item["issues"]), q.get("rationale", ""), run["report"].get("score_mode", "reviewed"), q.get("scoring_policy", ""), run["report"].get("metrics_version"), q.get("result", ""), *[checks.get(key, "") for key in ("option_format", "no_duplicates", "designated_answer", "unique_source_answer")], ",".join(q.get("source_match_option_ids", []))]])
+                writer.writerow([csv_value(x) for x in [paper["paper_id"], item["question_id"], item["expression_text"], item["matched"], item.get("match_type") or "", item.get("match_credit", 1.0 if item["matched"] else 0.0), item["structure_valid"], q["status"], q["source"], None if q["q"] is None else round(q["q"] * 100, 2), ",".join(q.get("accepted_option_ids", [])), item.get("answer_id", ""), "; ".join(i["message"] for i in item["issues"]), q.get("rationale", ""), run["report"].get("score_mode", "reviewed"), q.get("scoring_policy", ""), run["report"].get("metrics_version"), q.get("result", ""), *[checks.get(key, "") for key in ("option_format", "no_duplicates", "designated_answer", "unique_source_answer")], ",".join(q.get("source_match_option_ids", []))]])
         return Response("\ufeff" + buffer.getvalue(), media_type="text/csv; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="paperlingo-{run_id}.csv"'})
 
     static = Path(__file__).parent / "static"

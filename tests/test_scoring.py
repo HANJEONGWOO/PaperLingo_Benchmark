@@ -157,16 +157,21 @@ def test_structural_errors_retained_in_denominator(dataset, change, code):
     assert report["counts"]["predicted"] == 1
 
 
-def test_whole_expression_matching_not_blank_and_case_sensitive(dataset):
+def test_whole_expression_matching_not_blank_and_ignores_case(dataset):
     q = question(dataset)
     q["expression_text"] = "with"
     q["expression_span"] = deepcopy(q["blank_span"])
     report = evaluate(dataset, [{"paper_id": "p1", "questions": [q]}], ["p1"], "custom")
+    # A lone shared function word earns no partial credit.
     assert report["counts"]["matched"] == 0
+    assert report["papers"][0]["items"][0]["match_credit"] == 0.0
     assert report["papers"][0]["items"][0]["structure_valid"] is True
-    q["expression_text"] = "Consistent with"
+    q["expression_text"] = "Consistent With"
     report = evaluate(dataset, [{"paper_id": "p1", "questions": [q]}], ["p1"], "custom")
-    assert report["counts"]["matched"] == 0
+    item = report["papers"][0]["items"][0]
+    # Case differences still select the right words: full credit.
+    assert (item["match_credit"], item["match_type"], item["matched_expression"]) == (1.0, "exact", "consistent with")
+    assert report["counts"]["exact_matched"] == 1
 
 
 def test_word_fragment_cannot_be_valid_expression(dataset):
@@ -213,7 +218,7 @@ def test_fatal_contract_failures(dataset, case):
     elif case == "extra":
         predictions[0]["score"] = 100
     elif case == "too_many":
-        predictions[0]["questions"] = [question(dataset, question_id=f"q{i}") for i in range(6)]
+        predictions[0]["questions"] = [question(dataset, question_id=f"q{i}") for i in range(11)]
     elif case == "bad_expression_type":
         predictions[0]["questions"][0]["expression_text"] = 1
     elif case == "extra_question_field":
@@ -242,7 +247,7 @@ def mark_temporary(item):
 
 def test_new_reports_identify_automatic_quality_policy(dataset):
     report = evaluate(dataset, [], ["p1"], "custom")
-    assert report["metrics_version"] == "exact-rq-v3"
+    assert report["metrics_version"] == "soft-rq-v4"
     assert report["quality_policy_version"] == "auto-conservative-v1"
     assert report["score_mode"] == "reviewed"
     assert report["counts"]["quality_temporary"] == 0
@@ -447,3 +452,99 @@ def test_v3_weights_each_matched_quality_once_and_excludes_unmatched_quality(fiv
     recompute(report)
     assert report["metrics"]["quality_all_pct"] == 37.5
     assert report["metrics"]["final_score"] == 30
+
+
+def soft(dataset, texts, paper_id="p1"):
+    questions = [{"expression_text": text, "options": [text.split()[-1], "zz1", "zz2", "zz3"], "answer_id": 0} for text in texts]
+    report = evaluate(dataset, [{"paper_id": paper_id, "questions": questions}], [paper_id], "custom")
+    return report, report["papers"][0]["items"]
+
+
+# Weights: content words 1.0, function words 0.3, so "consistent with" = 1.3.
+@pytest.mark.parametrize("text, credit, kind", [
+    ("consistent with", 1.0, "exact"),
+    ("are consistent with", 1.3 / 1.6, "superset"),       # extra function word "are"
+    ("Results are consistent with evidence", 1.3 / 3.6, "superset"),
+    ("consistent", 1 / 1.3, "subset"),                    # the content word share
+    ("Results are consistent", 1 / 2.6, "overlap"),       # shares only "consistent"
+    ("with evidence", 0.0, None),                         # shares only a function word
+    ("evidence and", 0.0, None),
+    ("onsistent with", 0.0, None),                        # not on word boundaries
+    ("ARE CONSISTENT WITH", 1.3 / 1.6, "superset"),       # case is ignored
+    ("Consistent", 1 / 1.3, "subset"),
+])
+def test_partial_credit_is_token_jaccard_at_source_positions(dataset, text, credit, kind):
+    report, items = soft(dataset, [text])
+    assert items[0]["match_credit"] == pytest.approx(credit, abs=1e-6)
+    assert items[0]["match_type"] == kind
+    assert items[0]["matched"] is (credit > 0)
+    assert report["metrics"]["recall_pct"] == pytest.approx(100 * credit / 2, abs=1e-4)
+
+
+def test_partial_credit_is_one_to_one_and_exact_first(dataset):
+    report, items = soft(dataset, ["consistent", "are consistent with", "consistent with", "depend on controls"])
+    assert [item["match_credit"] for item in items] == [0.0, 0.0, 1.0, pytest.approx(1.3 / 2.3, abs=1e-6)]
+    assert [item["matched_expression"] for item in items] == [None, None, "consistent with", "depend on"]
+    assert report["counts"]["exact_matched"] == 1 and report["counts"]["partial_matched"] == 1
+    assert report["counts"]["credited_matches"] == pytest.approx(1 + 1.3 / 2.3, abs=1e-6)
+    assert report["metrics"]["exact_recall_pct"] == 50
+    assert report["papers"][0]["missing_expressions"] == []
+
+
+def test_duplicate_submission_earns_no_partial_credit(dataset):
+    _, items = soft(dataset, ["are consistent with", "are consistent with"])
+    assert [item["match_credit"] for item in items] == [pytest.approx(1.3 / 1.6, abs=1e-6), 0.0]
+
+
+def test_final_score_weights_quality_by_match_credit(dataset):
+    report, items = soft(dataset, ["consistent with", "depend on controls"])
+    assert all(item["structure_valid"] for item in items)
+    items[0]["quality"] = {**items[0]["quality"], "status": "complete", "q": 1.0}
+    items[1]["quality"] = {**items[1]["quality"], "status": "complete", "q": 0.0}
+    metrics = recompute(report)["metrics"]
+    # Σ credit × q / references = (1 × 1 + 0.565 × 0) / 2
+    assert metrics["final_score"] == pytest.approx(50)
+    assert metrics["quality_matched_pct"] == pytest.approx(100 / (1 + 1.3 / 2.3), abs=1e-4)
+
+
+def test_v3_reports_keep_exact_recall_on_recompute(dataset):
+    report, items = soft(dataset, ["consistent with", "are consistent"])
+    report["metrics_version"] = "exact-rq-v3"
+    for item in items:
+        item.pop("match_credit"); item["matched"] = item["match_type"] == "exact"
+    assert recompute(report)["metrics"]["recall_pct"] == 50
+
+
+def custom_dataset(tmp_path, abstract, references):
+    rows = (("abstract_data.jsonl", [{"paper_id": "p", "abstract": abstract}]),
+            ("abstract_labels_v2.jsonl", [{"paper_id": "p", "expressions": [{"text": text} for text in references]}]))
+    for filename, records in rows:
+        (tmp_path / filename).write_text("\n".join(json.dumps(row) for row in records))
+    return Dataset(tmp_path)
+
+
+@pytest.mark.parametrize("text, credit", [
+    ("so as to minimize", 0.9 / 1.9),        # contains the whole function-word reference
+    ("as to", 0.6 / 0.9),                    # two shared words
+    ("to", 0.0),                             # a single shared function word
+])
+def test_function_word_references_still_earn_partial_credit(tmp_path, text, credit):
+    dataset = custom_dataset(tmp_path, "We tune it so as to minimize loss.", ["so as to"])
+    _, items = soft(dataset, [text], paper_id="p")
+    assert items[0]["match_credit"] == pytest.approx(credit, abs=1e-6)
+
+
+def test_partial_assignment_maximizes_total_credit(tmp_path):
+    # "shed light on growth" ties both references (2.3 / 3.3). Greedy would take
+    # the first and leave "shed" with nothing; the optimum credits both.
+    dataset = custom_dataset(tmp_path, "Results shed light on growth.", ["shed light on", "light on growth"])
+    report, items = soft(dataset, ["shed light on growth", "shed"], paper_id="p")
+    assert [item["matched_expression"] for item in items] == ["light on growth", "shed light on"]
+    assert report["counts"]["credited_matches"] == pytest.approx(2.3 / 3.3 + 1 / 2.3, abs=1e-6)
+
+
+def test_case_variant_of_one_reference_is_used_once(tmp_path):
+    dataset = custom_dataset(tmp_path, "Also, we test it. We also test it again.", ["Also", "test it again"])
+    report, items = soft(dataset, ["also", "ALSO", "Test It Again"], paper_id="p")
+    assert [item["match_credit"] for item in items] == [1.0, 0.0, 1.0]
+    assert report["counts"]["exact_matched"] == 2

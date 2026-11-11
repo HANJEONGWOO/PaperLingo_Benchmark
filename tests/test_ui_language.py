@@ -90,7 +90,7 @@ def test_updated_page_bypasses_old_unversioned_script(browser, web_url):
         page.unroute(web_url + "/")
         page.reload(wait_until="networkidle")
         pw.expect(page.locator("#stat-papers")).to_have_text("1,044")
-        pw.expect(page.locator("#stat-expressions")).to_have_text("4,832")
+        pw.expect(page.locator("#stat-expressions")).to_have_text("5,497")
         pw.expect(page.locator("#stat-domains")).to_have_text("147")
         pw.expect(page.locator("html")).to_have_attribute("lang", "en")
 
@@ -163,9 +163,9 @@ def test_validation_messages_translate_in_place(page):
     pw.expect(page.locator("#upload-errors")).to_contain_text("JSONL 1행")
     language(page, "en")
     pw.expect(page.locator("#upload-errors")).to_contain_text("JSONL line 1")
-    page.locator("#prediction-text").fill('[{"paper_id":"0911.3369","questions":[' + ','.join(['{}'] * 6) + ']}]')
+    page.locator("#prediction-text").fill('[{"paper_id":"0911.3369","questions":[' + ','.join(['{}'] * 11) + ']}]')
     page.locator("#evaluate-button").click()
-    pw.expect(page.locator("#upload-errors")).to_contain_text("At most 5 questions")
+    pw.expect(page.locator("#upload-errors")).to_contain_text("At most 10 questions")
 
 
 def test_data_guide_and_mobile_layout_keep_evaluation_downloads_disabled(page):
@@ -175,7 +175,7 @@ def test_data_guide_and_mobile_layout_keep_evaluation_downloads_disabled(page):
     ):
         language(page, code)
         pw.expect(page.locator("#stat-papers")).to_have_text("1,044")
-        pw.expect(page.locator("#stat-expressions")).to_have_text("4,832")
+        pw.expect(page.locator("#stat-expressions")).to_have_text("5,497")
         pw.expect(page.locator("#stat-domains")).to_have_text("147")
         pw.expect(page.locator(".dataset-strip > div > span").nth(0)).to_have_text(labels[0])
         pw.expect(page.locator(".dataset-strip > div > span").nth(1)).to_have_text(labels[1])
@@ -288,7 +288,7 @@ def test_upload_after_example_load_uses_file_ids_without_a_scope_selector(page):
     report = response.json()["report"]
     assert report["scope"]["name"] == "evaluation"
     assert report["scope"]["paper_count"] == 1044
-    assert report["counts"]["gold"] == 4832
+    assert report["counts"]["gold"] == 5497
     pw.expect(page.locator("#report-meta")).to_contain_text("Evaluation · 1,044 papers")
     # Pasting downloaded examples after a real evaluation must also re-detect.
     page.locator("#prediction-text").fill(sample_text)

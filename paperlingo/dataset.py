@@ -52,12 +52,17 @@ class Dataset:
     MIN_EVALUATION_SENTENCES = 5
     EXAMPLE_PAPER_IDS = ("0911.3369", "1109.3182", "1709.01217")
     EXAMPLE_ANSWER_VERSION = "authored-demo-v1"
+    EVALUATION_LABELS_FILE = "paperlingo-evaluation-labels-1044-grammar.jsonl"
+    MAX_REFERENCE_EXPRESSIONS = 10
 
     def __init__(self, data_dir: Path):
         self.data_dir = Path(data_dir)
         digest = hashlib.sha256()
         rows = {}
-        for filename in ("abstract_data.jsonl", "abstract_labels_v2.jsonl"):
+        filenames = ["abstract_data.jsonl", "abstract_labels_v2.jsonl"]
+        if (self.data_dir / self.EVALUATION_LABELS_FILE).is_file():
+            filenames.append(self.EVALUATION_LABELS_FILE)
+        for filename in filenames:
             path = self.data_dir / filename
             content = path.read_bytes()
             digest.update(filename.encode() + b"\0" + content + b"\0")
@@ -86,6 +91,20 @@ class Dataset:
             missing = sorted(set(self.papers) - set(label_rows))[:5]
             extra = sorted(set(label_rows) - set(self.papers))[:5]
             raise DatasetError(f"Paper and label IDs differ: missing={missing}, extra={extra}")
+        # The evaluation answer key replaces the original labels of evaluation
+        # papers only; example labels still come from abstract_labels_v2.jsonl.
+        evaluation_rows = rows.get(self.EVALUATION_LABELS_FILE)
+        # Example selection uses the original labels so the answer key cannot move the split.
+        has_source_labels = {pid: bool(row.get("expressions")) for pid, row in label_rows.items()}
+        if evaluation_rows is not None:
+            extra = sorted(set(evaluation_rows) - set(self.papers))[:5]
+            if extra:
+                raise DatasetError(f"{self.EVALUATION_LABELS_FILE}: unknown paper IDs {extra}")
+            label_rows = {**label_rows, **evaluation_rows}
+        self.label_sources = {
+            "default": "abstract_labels_v2.jsonl",
+            "evaluation": self.EVALUATION_LABELS_FILE if evaluation_rows is not None else "abstract_labels_v2.jsonl",
+        }
 
         self.labels: dict[str, list[dict]] = {}
         repeated = []
@@ -99,8 +118,8 @@ class Dataset:
             if not isinstance(abstract, str) or not abstract:
                 raise DatasetError(f"{paper_id}: abstract must be nonempty text")
             expressions = label_rows[paper_id].get("expressions")
-            if not isinstance(expressions, list) or len(expressions) > 5:
-                raise DatasetError(f"{paper_id}: expressions must contain 0–5 items")
+            if not isinstance(expressions, list) or len(expressions) > self.MAX_REFERENCE_EXPRESSIONS:
+                raise DatasetError(f"{paper_id}: expressions must contain 0–{self.MAX_REFERENCE_EXPRESSIONS} items")
             seen = set()
             for expression in expressions:
                 if not isinstance(expression, dict):
@@ -166,13 +185,13 @@ class Dataset:
             "warnings": warnings,
         }
 
-        preferred = [paper_id for paper_id in self.EXAMPLE_PAPER_IDS[:2] if paper_id in self.papers and self.labels[paper_id]]
+        preferred = [paper_id for paper_id in self.EXAMPLE_PAPER_IDS[:2] if paper_id in self.papers and has_source_labels[paper_id]]
         for paper_id in sorted(self.papers):
             if len(preferred) >= 2:
                 break
-            if self.labels[paper_id] and paper_id not in preferred:
+            if has_source_labels[paper_id] and paper_id not in preferred:
                 preferred.append(paper_id)
-        empty = [paper_id for paper_id in sorted(self.papers) if not self.labels[paper_id]]
+        empty = [paper_id for paper_id in sorted(self.papers) if not has_source_labels[paper_id]]
         if empty:
             preferred.append(self.EXAMPLE_PAPER_IDS[2] if self.EXAMPLE_PAPER_IDS[2] in empty else empty[0])
         for paper_id in sorted(self.papers):
@@ -198,6 +217,13 @@ class Dataset:
             "demo": preferred,
             "evaluation": eligible_ids,
         }
+        if evaluation_rows is not None and set(evaluation_rows) != set(eligible_ids):
+            missing = sorted(set(eligible_ids) - set(evaluation_rows))[:5]
+            extra = sorted(set(evaluation_rows) - set(eligible_ids))[:5]
+            raise DatasetError(
+                f"{self.EVALUATION_LABELS_FILE} must cover exactly the evaluation split: "
+                f"missing={missing}, extra={extra}"
+            )
 
     def example_answer_metadata(self) -> dict:
         return {
@@ -219,6 +245,7 @@ class Dataset:
             "version": self.version,
             "split_version": self.SPLIT_VERSION,
             "evaluation_filter": deepcopy(self.evaluation_filter),
+            "label_sources": dict(self.label_sources),
             "splits": {key: len(ids) for key, ids in self.splits.items()},
             "split_stats": {
                 scope: {

@@ -18,7 +18,7 @@ from paperlingo.storage import Store
 
 
 HEADERS = {"X-Requested-With": "PaperLingo"}
-NEW_VERSION = "exact-rq-v3"
+NEW_VERSION = "soft-rq-v4"
 OLD_VERSIONS = ("exact-prq-v1", "exact-prq-v2", None)
 # Only the first submitted expression is gold; the other expressions still occur
 # verbatim in the abstract and produce structurally valid questions.
@@ -198,11 +198,15 @@ def test_recall_denominator_uses_actual_labels_including_missing_papers(settings
         assert report["metrics"]["final_score"] == pytest.approx(100 / 3)
 
 
-def test_six_questions_are_rejected_instead_of_truncated(settings):
+def test_eleven_questions_are_rejected_instead_of_truncated(settings):
     with TestClient(create_app(settings)) as client:
-        response = submit(client, count=6)
+        payload = predictions(6)
+        payload[0]["questions"] = (payload[0]["questions"] * 2)[:11]
+        response = client.post("/api/runs", headers=HEADERS, json={
+            "name": "회수율 지표 회귀 검사", "scope": "demo", "predictions": payload,
+        })
         assert response.status_code == 422
-        assert "최대 5개" in response.text
+        assert "최대 10개" in response.text
         assert client.get("/api/runs").json()["items"] == []
 
 

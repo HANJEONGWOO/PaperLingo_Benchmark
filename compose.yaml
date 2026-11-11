@@ -37,6 +37,10 @@ services:
           target: /app/data/abstract_labels_v2.jsonl
           initial_sync: true
         - action: sync+restart
+          path: ./data/paperlingo-evaluation-labels-1044-grammar.jsonl
+          target: /app/data/paperlingo-evaluation-labels-1044-grammar.jsonl
+          initial_sync: true
+        - action: sync+restart
           path: ./data/labeling_prompt_v2.md
           target: /app/data/labeling_prompt_v2.md
           initial_sync: true
