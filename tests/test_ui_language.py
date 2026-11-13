@@ -100,6 +100,7 @@ def test_updated_page_bypasses_old_unversioned_script(browser, web_url):
 def test_saved_choice_and_cross_tab_changes_do_not_reload_or_reset_inputs(page, web_url):
     pw.expect(page.locator("html")).to_have_attribute("lang", "en")
     page.locator("#run-name").fill("모델 평가")  # Must not be mistaken for a UI translation key.
+    page.locator('[data-input-mode="paste"]').click()
     page.locator("#prediction-text").fill('[{"paper_id":"keep my input"}]')
     pw.expect(page.locator("#evaluation-form select")).to_have_count(0)
     page.evaluate("window.languageTestMarker = 1234")
@@ -154,6 +155,58 @@ def test_results_checks_filters_and_raw_options_survive_switching(page):
     assert page.locator("#paper-results > details").first.get_attribute("open") is not None
 
 
+def test_report_keeps_secondary_metrics_collapsed_until_requested(page):
+    page.locator("#load-sample").click()
+    page.locator("#run-name").fill("metric layout")
+    page.locator("#evaluate-button").click()
+    pw.expect(page.locator("#report-section")).to_be_visible()
+    pw.expect(page.locator("#metric-cards .metric-card")).to_have_count(3)
+    pw.expect(page.locator("#metric-cards")).to_contain_text("Final score")
+    pw.expect(page.locator("#metric-cards")).to_contain_text("Recall")
+    pw.expect(page.locator("#metric-cards")).to_contain_text("Matched-question pass rate")
+    secondary = page.locator("#report-secondary details")
+    pw.expect(secondary).to_have_count(1)
+    assert secondary.evaluate("element => element.open") is False
+    secondary.locator("summary").click()
+    pw.expect(secondary).to_have_attribute("open", "")
+    pw.expect(secondary).to_contain_text("Precision")
+    pw.expect(secondary).to_contain_text("F1")
+    language(page, "ko")
+    pw.expect(secondary.locator("summary")).to_have_text("보조 지표 숨기기")
+    page.evaluate("renderReport()")
+    pw.expect(secondary).to_have_attribute("open", "")
+    language(page, "en")
+    for width in (320, 700, 900, 1440):
+        page.set_viewport_size({"width": width, "height": 1000})
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+
+
+def test_input_tabs_preserve_content_and_support_keyboard_and_upload(page):
+    file_tab = page.locator('[data-input-mode="file"]')
+    paste_tab = page.locator('[data-input-mode="paste"]')
+    pw.expect(page.locator("#input-file-pane")).to_be_visible()
+    pw.expect(page.locator("#prediction-text")).to_be_hidden()
+    file_tab.focus()
+    file_tab.press("ArrowRight")
+    pw.expect(paste_tab).to_be_focused()
+    pw.expect(paste_tab).to_have_attribute("aria-selected", "true")
+    page.locator("#prediction-text").fill('[{"paper_id":"preserve"}]')
+    paste_tab.press("Home")
+    pw.expect(file_tab).to_be_focused()
+    pw.expect(page.locator("#prediction-text")).to_have_value('[{"paper_id":"preserve"}]')
+    prediction = json.dumps({"paper_id": "0911.3369", "questions": []})
+    page.locator("#prediction-file").set_input_files({
+        "name": "submission.jsonl", "mimeType": "application/json", "buffer": prediction.encode(),
+    })
+    pw.expect(page.locator("#file-label")).to_contain_text("submission.jsonl")
+    pw.expect(page.locator("#input-file-pane")).to_be_visible()
+    file_tab.press("End")
+    pw.expect(page.locator("#prediction-text")).to_have_value(prediction)
+    language(page, "ko")
+    pw.expect(paste_tab).to_have_attribute("aria-selected", "true")
+    pw.expect(page.locator("#prediction-text")).to_have_value(prediction)
+
+
 def test_validation_messages_translate_in_place(page):
     page.locator("#run-name").fill("validation")
     page.locator("#evaluate-button").click()
@@ -170,10 +223,10 @@ def test_validation_messages_translate_in_place(page):
     pw.expect(page.locator("#upload-errors")).to_contain_text("At most 10 questions")
 
 
-def test_data_guide_and_mobile_layout_keep_evaluation_downloads_disabled(page):
+def test_data_guide_and_mobile_layout_keep_evaluation_answers_private(page):
     for code, labels in (
-        ("en", ["Evaluation papers", "Evaluation expressions", "Evaluation domains"]),
-        ("ko", ["평가 논문", "평가 참조 표현", "평가 연구 분야"]),
+        ("en", ["Evaluation papers", "Reference expressions", "Research domains"]),
+        ("ko", ["평가 논문", "참조 표현", "연구 분야"]),
     ):
         language(page, code)
         pw.expect(page.locator("#stat-papers")).to_have_text("1,044")
@@ -182,14 +235,15 @@ def test_data_guide_and_mobile_layout_keep_evaluation_downloads_disabled(page):
         pw.expect(page.locator(".dataset-strip > div > span").nth(0)).to_have_text(labels[0])
         pw.expect(page.locator(".dataset-strip > div > span").nth(1)).to_have_text(labels[1])
         pw.expect(page.locator(".dataset-strip > div > span").nth(2)).to_have_text(labels[2])
-        for width in (320, 1440):
+        for width in (320, 640, 700, 900, 1440):
             page.set_viewport_size({"width": width, "height": 1000})
             assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
     language(page, "en")
     page.locator('[data-page="dataset"]').click()
     pw.expect(page.locator("#dataset-size-evaluation")).to_have_text("1,044")
-    pw.expect(page.locator("#evaluation-label-download")).to_have_text("Selected expressions ↓")
-    pw.expect(page.locator("#evaluation-answer-download")).to_be_disabled()
+    pw.expect(page.locator(".evaluation-download-card .download-actions a")).to_have_count(1)
+    pw.expect(page.locator(".evaluation-download-card .download-note")).to_contain_text("not provided")
+    pw.expect(page.locator("#evaluation-label-download, #evaluation-answer-download")).to_have_count(0)
     # Only the two public examples with reference expressions are shown.
     pw.expect(page.locator("#dataset-list details")).to_have_count(2)
     pw.expect(page.locator("#dataset-list")).not_to_contain_text("Truly Concurrent Process Algebra")
@@ -201,13 +255,17 @@ def test_data_guide_and_mobile_layout_keep_evaluation_downloads_disabled(page):
     language(page, "en")
     assert page.locator("#dataset-list .abstract-text").first.inner_text() == original
     assert page.locator("#dataset-list details").first.get_attribute("open") is not None
-    pw.expect(page.locator("#evaluation-label-download")).to_be_disabled()
     for width in (390, 320):
         page.set_viewport_size({"width": width, "height": 844})
         assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
     page.locator('[data-page="method"]').click()
     pw.expect(page.locator("#page-method")).to_contain_text("How scores are measured")
+    pw.expect(page.locator(".method-detail-grid")).to_be_hidden()
+    page.locator(".method-details > summary").click()
+    pw.expect(page.locator(".method-detail-grid")).to_be_visible()
     pw.expect(page.locator("#page-method")).to_contain_text("How is partial credit given?")
+    page.locator(".schema-details > summary").click()
+    pw.expect(page.locator(".schema-code")).to_be_visible()
     text = page.locator("body").inner_text()
     for jargon in ("soft-rq", "exact-rq", "code-basic", "Qmatched", "PAPERLINGO / V1", "protocol v"):
         assert jargon not in text, jargon
@@ -254,6 +312,7 @@ def test_example_downloads_and_submission_score_full_marks_in_both_languages(pag
     pw.expect(page.locator("#example-download-description")).to_contain_text("논문 2편")
     page.locator('[data-page="evaluate"]').click()
     page.locator("#run-name").fill("예시 다운로드 검증")
+    page.locator('[data-input-mode="paste"]').click()
     page.locator("#prediction-text").fill(json.dumps(downloads["answers"], ensure_ascii=False))
     page.locator("#evaluate-button").click()
     pw.expect(page.locator("#report-section")).to_be_visible()

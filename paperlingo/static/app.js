@@ -120,6 +120,18 @@ function navigate(page, updateHash = true) {
   if (state.config && page === "history") loadHistory();
   if (state.config && page === "dataset") loadDataset();
 }
+function setInputMode(mode) {
+  const selected = mode === "paste" ? "paste" : "file";
+  $$('[data-input-mode]').forEach(button => {
+    const active = button.dataset.inputMode === selected;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", String(active));
+    button.tabIndex = active ? 0 : -1;
+  });
+  const filePane = $("#input-file-pane"), pastePane = $("#input-paste-pane");
+  if (filePane) filePane.hidden = selected !== "file";
+  if (pastePane) pastePane.hidden = selected !== "paste";
+}
 function openLogin() { if (!$("#login-dialog").open) $("#login-dialog").showModal(); }
 function updateAccess() {
   const session = state.session || {};
@@ -128,7 +140,7 @@ function updateAccess() {
   $("#auth-button").hidden = !session.auth_required;
   I18n.setText($("#auth-button"), () => session.authenticated && session.can_manage ? msg("로그아웃") : msg("로그인"));
   $("#login-close").hidden = session.auth_required && !session.public_read && !session.authenticated;
-  $$("#evaluation-form input, #evaluation-form textarea, #evaluation-form select").forEach(input => { input.disabled = !session.can_manage; });
+  $$("#evaluation-form input, #evaluation-form textarea, #evaluation-form select, #evaluation-form [data-input-mode]").forEach(input => { input.disabled = !session.can_manage; });
 }
 async function initialize() {
   try {
@@ -191,6 +203,7 @@ async function loadSample() {
   try {
     const sample = await api("/api/sample");
     $("#prediction-text").value = sample.predictions.map(prediction => JSON.stringify(prediction)).join("\n");
+    setInputMode("paste");
     $("#run-name").value = msg("입력 형식 예제 · 참조 표현 전체");
     const questionCount = sample.predictions.reduce((sum, paper) => sum + paper.questions.length, 0);
     I18n.setText($("#file-label"), () => msg("참조 표현을 모두 담은 형식 예제 · {0}편 / {1}문항", sample.predictions.length, questionCount));
@@ -202,7 +215,7 @@ async function loadSample() {
 async function submitEvaluation(event) {
   event.preventDefault();
   const predictions = $("#prediction-text").value.trim();
-  if (!predictions) { showMessage("#upload-errors", msg("생성 결과 파일을 선택하거나 JSON/JSONL을 붙여넣어주세요."), "error"); $("#prediction-text").focus(); return; }
+  if (!predictions) { showMessage("#upload-errors", msg("생성 결과 파일을 선택하거나 JSON/JSONL을 붙여넣어주세요."), "error"); setInputMode("paste"); $("#prediction-text").focus(); return; }
   const payload = { name: $("#run-name").value.trim(), predictions };
   const button = $("#evaluate-button"); setBusy(button, true, msg("표현 채점 중")); showMessage("#upload-errors", "");
   try {
@@ -226,6 +239,36 @@ function metricCard(label, value, detail, featured = false, pending = false, suf
   const bar = node("div", "metric-bar"); const fill = node("span"); fill.style.width = `${Math.max(0, Math.min(100, Number(value || 0)))}%`; bar.append(fill); card.append(bar); return card;
 }
 function secondaryMetric(label, value) { const element = node("div", "secondary-metric"); element.append(document.createTextNode(label), node("strong", "", () => value)); return element; }
+function renderSecondaryMetrics(metrics, counts, code, temporaryCount) {
+  const container = $("#report-secondary");
+  // Keep the user's choice open while background judge-status polling redraws the report.
+  const wasOpen = container.querySelector("details")?.open || false;
+  const details = node("details", "report-secondary-details");
+  details.open = wasOpen;
+  const summary = node("summary", "report-secondary-summary");
+  const content = node("div", "secondary-metrics-list");
+  const summaryId = "report-secondary-toggle";
+  summary.id = summaryId;
+  content.setAttribute("role", "group");
+  content.setAttribute("aria-labelledby", summaryId);
+  const updateSummary = () => I18n.setText(summary, () => details.open ? msg("보조 지표 숨기기") : msg("보조 지표 보기"));
+  updateSummary();
+  details.addEventListener("toggle", updateSummary);
+  content.append(
+    secondaryMetric(code ? msg("전체 문항 통과율") : msg("전체 문항 품질"), percent(metrics.quality_all_pct)),
+    secondaryMetric(code ? msg("원문 일치 유일률") : msg("단일 정답률"), percent(code ? metrics.source_unique_answer_rate_pct : metrics.unique_answer_rate_pct)),
+    secondaryMetric(msg("구조 유효율"), percent(metrics.structural_validity_pct)),
+    secondaryMetric(msg("논문 제출률"), percent(metrics.coverage_pct)),
+    secondaryMetric(msg("빈 라벨 미생성 정확도"), percent(metrics.empty_gold_abstention_pct)),
+    secondaryMetric(code ? msg("코드 검사 완료") : msg("품질 처리"), msg("{0} / {1}개", number(counts.quality_complete), number(counts.predicted))),
+    secondaryMetric(msg("Precision · 보조 지표"), percent(metrics.precision_pct)),
+    secondaryMetric(msg("F1 · 보조 지표"), percent(metrics.f1_pct))
+  );
+  if (temporaryCount) content.append(secondaryMetric(msg("임시 만점 처리"), msg("{0}개", number(temporaryCount))));
+  if (counts.review_recommended) content.append(secondaryMetric(msg("사람 검수 권장"), msg("{0}개", number(counts.review_recommended))));
+  details.append(summary, content);
+  container.replaceChildren(details);
+}
 function renderReport() {
   const run = state.run;
   if (!run) return;
@@ -244,27 +287,14 @@ function renderReport() {
   $("#temporary-banner").hidden = !temporary;
   I18n.setText($("#skip-judge-help"), () => msg("구조가 유효한 모든 문항의 Q를 100%로 처리합니다(기존 검수 포함). 이 기록의 최종 점수는 {0}이며 검증된 성능이 아닙니다.", rule.formula));
   if (temporary) I18n.setText($("#temporary-count"), () => msg("{0}개 문항의 품질을 검수 없이 100%로 임시 처리했습니다. 구조 오류는 0점이며 최종 점수는 {1}로 계산합니다. 검증된 성능이 아니므로 일반 평가와 비교할 수 없습니다.", number(temporaryCount), rule.formula));
-  const cards = $("#metric-cards"); cards.replaceChildren(
+  const cards = $("#metric-cards"); cards.classList.add("primary-metrics"); cards.replaceChildren(
+    metricCard(temporary ? msg("최종 점수 · 임시") : rule.legacy ? msg("최종 점수 · 이전 기준") : msg("최종 점수"), metrics.final_score, msg("{0}{1}", temporary ? msg("검증 전 임시값 · ") : "", rule.formula), true, unresolved > 0, "/ 100"),
     rule.soft
       ? metricCard(msg("Recall · 부분 점수 포함"), metrics.recall_pct, msg("정확 {0} + 부분 {1} = {2}점 / {3}개 실제 참조", number(counts.exact_matched), number(counts.partial_matched), number(counts.credited_matches), number(counts.gold)))
       : metricCard(msg("Recall · 표현 재현율"), metrics.recall_pct, msg("{0}개 일치 / {1}개 실제 참조", number(counts.matched), number(counts.gold))),
-    rule.soft
-      ? metricCard(msg("Precision · 보조 지표"), metrics.precision_pct, msg("{0}점 / {1}개 생성", number(counts.credited_matches), number(counts.predicted)))
-      : metricCard(rule.legacy ? msg("Precision · 선정 정확도") : msg("Precision · 보조 지표"), metrics.precision_pct, msg("{0}개 일치 / {1}개 생성", number(counts.matched), number(counts.predicted))),
-    metricCard(msg("F1 · 보조 지표"), metrics.f1_pct, msg("Precision과 Recall의 조화평균")),
-    metricCard(code ? msg("Qcheck · 일치 문항 통과율") : temporary ? msg("Q · 일치 문항 품질 (임시)") : msg("Q · 일치 문항 품질"), metrics.quality_matched_pct, code ? msg("참조 라벨과 일치한 문항 중 검사 통과 비율") : temporary ? msg("검수 없이 만점 처리한 문항 포함") : msg("참조 라벨과 일치한 문항의 평균"), false, unresolved > 0 && counts.matched > 0),
-    metricCard(temporary ? msg("최종 점수 · 임시") : rule.legacy ? msg("최종 점수 · 이전 기준") : msg("최종 점수"), metrics.final_score, msg("{0}{1}", temporary ? msg("검증 전 임시값 · ") : "", rule.formula), true, unresolved > 0, "/ 100")
+    metricCard(code ? msg("Qcheck · 일치 문항 통과율") : temporary ? msg("Q · 일치 문항 품질 (임시)") : msg("Q · 일치 문항 품질"), metrics.quality_matched_pct, code ? msg("참조 라벨과 일치한 문항 중 검사 통과 비율") : temporary ? msg("검수 없이 만점 처리한 문항 포함") : msg("참조 라벨과 일치한 문항의 평균"), false, unresolved > 0 && counts.matched > 0)
   );
-  $("#report-secondary").replaceChildren(
-    secondaryMetric(code ? msg("전체 문항 통과율") : msg("전체 문항 품질"), percent(metrics.quality_all_pct)),
-    secondaryMetric(code ? msg("원문 일치 유일률") : msg("단일 정답률"), percent(code ? metrics.source_unique_answer_rate_pct : metrics.unique_answer_rate_pct)),
-    secondaryMetric(msg("구조 유효율"), percent(metrics.structural_validity_pct)),
-    secondaryMetric(msg("논문 제출률"), percent(metrics.coverage_pct)),
-    secondaryMetric(msg("빈 라벨 미생성 정확도"), percent(metrics.empty_gold_abstention_pct)),
-    secondaryMetric(code ? msg("코드 검사 완료") : msg("품질 처리"), msg("{0} / {1}개", number(counts.quality_complete), number(counts.predicted)))
-  );
-  if (temporaryCount) $("#report-secondary").append(secondaryMetric(msg("임시 만점 처리"), msg("{0}개", number(temporaryCount))));
-  if (counts.review_recommended) $("#report-secondary").append(secondaryMetric(msg("사람 검수 권장"), msg("{0}개", number(counts.review_recommended))));
+  renderSecondaryMetrics(metrics, counts, code, temporaryCount);
   const notices = [];
   if (code) notices.push(msg("코드 검사 결과입니다. 유일한 정답은 원문 빈칸과 문자열이 일치하는 보기가 하나라는 뜻입니다. 문맥 충분성·의미적 복수 정답·오답의 교육적 품질은 검사하지 않았습니다."));
   else if (state.config?.review_mode === "code") notices.push(msg("이 기록은 이전 검수 기준을 유지합니다. 네 가지 코드 검사 점수는 같은 입력으로 새 평가를 제출하면 확인할 수 있습니다."));
@@ -574,6 +604,18 @@ function bindEvents() {
   $$("[data-page]").forEach(button => button.addEventListener("click", () => navigate(button.dataset.page)));
   $$("[data-go]").forEach(button => button.addEventListener("click", () => navigate(button.dataset.go)));
   window.addEventListener("hashchange", () => navigate(location.hash.slice(1), false));
+  const inputModeTabs = $$('[data-input-mode]');
+  inputModeTabs.forEach((button, index) => {
+    button.addEventListener("click", () => setInputMode(button.dataset.inputMode));
+    button.addEventListener("keydown", event => {
+      const keys = ["ArrowLeft", "ArrowRight", "Home", "End"];
+      if (!keys.includes(event.key)) return;
+      event.preventDefault();
+      const next = event.key === "Home" ? 0 : event.key === "End" ? inputModeTabs.length - 1 : (index + (event.key === "ArrowRight" ? 1 : -1) + inputModeTabs.length) % inputModeTabs.length;
+      inputModeTabs[next].focus();
+      setInputMode(inputModeTabs[next].dataset.inputMode);
+    });
+  });
   $("#prediction-file").addEventListener("change", event => readFile(event.target.files[0]));
   $("#prediction-text").addEventListener("input", () => { state.isSample = false; $("#demo-notice").hidden = true; });
   const drop = $("#dropzone");
@@ -610,6 +652,7 @@ function bindEvents() {
 }
 
 I18n.init();
+setInputMode("file");
 bindEvents();
 navigate(location.hash.slice(1) || "evaluate", false);
 initialize();
