@@ -2,7 +2,7 @@
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
-const state = { session: null, config: null, judgeStatus: null, judgeStatusTimer: null, run: null, runs: [], reportPage: 0, pollTimer: null, pollVersion: 0, toastTimer: null, datasetSequence: 0, review: null, isSample: false, skippingRunId: null };
+const state = { session: null, config: null, judgeStatus: null, judgeStatusTimer: null, run: null, runs: [], reportPage: 0, pollTimer: null, pollVersion: 0, toastTimer: null, datasetSequence: 0, review: null, skippingRunId: null };
 const PAGE_SIZE = 10;
 const pageLabels = { evaluate: msg("모델 평가"), history: msg("평가 기록"), dataset: msg("참조 데이터"), method: msg("평가 기준") };
 const scopeLabels = { demo: msg("예시 데이터"), train: msg("학습 (이전 범위)"), evaluation: msg("평가"), development: msg("개발"), validation: msg("검증"), test: msg("최종 평가"), all: msg("전체"), custom: msg("직접 지정") };
@@ -193,24 +193,9 @@ async function readFile(file) {
   try {
     $("#prediction-text").value = await file.text();
     I18n.setText($("#file-label"), () => `${file.name} · ${(file.size / 1024).toFixed(1)} KB`);
-    state.isSample = false; $("#demo-notice").hidden = true;
     if (!$("#run-name").value) $("#run-name").value = file.name.replace(/\.(jsonl|json)$/i, "").slice(0, 120);
     showMessage("#upload-errors", "");
   } catch { showMessage("#upload-errors", msg("파일을 읽지 못했습니다. 다시 선택해주세요."), "error"); }
-}
-async function loadSample() {
-  const button = $("#load-sample"); setBusy(button, true, msg("불러오는 중"));
-  try {
-    const sample = await api("/api/sample");
-    $("#prediction-text").value = sample.predictions.map(prediction => JSON.stringify(prediction)).join("\n");
-    setInputMode("paste");
-    $("#run-name").value = msg("입력 형식 예제 · 참조 표현 전체");
-    const questionCount = sample.predictions.reduce((sum, paper) => sum + paper.questions.length, 0);
-    I18n.setText($("#file-label"), () => msg("참조 표현을 모두 담은 형식 예제 · {0}편 / {1}문항", sample.predictions.length, questionCount));
-    state.isSample = true; $("#demo-notice").hidden = false;
-    showMessage("#upload-errors", ""); toast(msg("예제를 불러왔습니다. 자동 평가 시작을 누르세요."));
-  } catch (error) { showMessage("#upload-errors", (error.uiMessage || error.message), "error"); }
-  finally { setBusy(button, false); }
 }
 async function submitEvaluation(event) {
   event.preventDefault();
@@ -256,13 +241,9 @@ function renderSecondaryMetrics(metrics, counts, code, temporaryCount) {
   details.addEventListener("toggle", updateSummary);
   content.append(
     secondaryMetric(code ? msg("전체 문항 통과율") : msg("전체 문항 품질"), percent(metrics.quality_all_pct)),
-    secondaryMetric(code ? msg("원문 일치 유일률") : msg("단일 정답률"), percent(code ? metrics.source_unique_answer_rate_pct : metrics.unique_answer_rate_pct)),
-    secondaryMetric(msg("구조 유효율"), percent(metrics.structural_validity_pct)),
-    secondaryMetric(msg("논문 제출률"), percent(metrics.coverage_pct)),
-    secondaryMetric(msg("빈 라벨 미생성 정확도"), percent(metrics.empty_gold_abstention_pct)),
     secondaryMetric(code ? msg("코드 검사 완료") : msg("품질 처리"), msg("{0} / {1}개", number(counts.quality_complete), number(counts.predicted))),
-    secondaryMetric(msg("Precision · 보조 지표"), percent(metrics.precision_pct)),
-    secondaryMetric(msg("F1 · 보조 지표"), percent(metrics.f1_pct))
+    secondaryMetric("Precision", percent(metrics.precision_pct)),
+    secondaryMetric("F1", percent(metrics.f1_pct))
   );
   if (temporaryCount) content.append(secondaryMetric(msg("임시 만점 처리"), msg("{0}개", number(temporaryCount))));
   if (counts.review_recommended) content.append(secondaryMetric(msg("사람 검수 권장"), msg("{0}개", number(counts.review_recommended))));
@@ -282,8 +263,6 @@ function renderReport() {
   $("#report-section").hidden = false;
   $("#report-title").textContent = run.name;
   I18n.setText($("#report-meta"), () => msg("{0} · {1} {2}편 · {3}{4}{5}", date(run.created_at), scopeLabels[report.scope.name] || report.scope.name, number(report.scope.paper_count), statusLabels[run.status] || run.status, rule.legacy ? msg(" · 이전 채점 방식") : "", temporary ? msg(" · 임시 점수") : ""));
-  $("#download-json").href = `/api/runs/${encodeURIComponent(run.id)}/export?format=json`;
-  $("#download-csv").href = `/api/runs/${encodeURIComponent(run.id)}/export?format=csv`;
   $("#temporary-banner").hidden = !temporary;
   I18n.setText($("#skip-judge-help"), () => msg("구조가 유효한 모든 문항의 Q를 100%로 처리합니다(기존 검수 포함). 이 기록의 최종 점수는 {0}이며 검증된 성능이 아닙니다.", rule.formula));
   if (temporary) I18n.setText($("#temporary-count"), () => msg("{0}개 문항의 품질을 검수 없이 100%로 임시 처리했습니다. 구조 오류는 0점이며 최종 점수는 {1}로 계산합니다. 검증된 성능이 아니므로 일반 평가와 비교할 수 없습니다.", number(temporaryCount), rule.formula));
@@ -501,7 +480,7 @@ async function loadHistory() {
   try {
     const result = await api("/api/runs"); state.runs = result.items || [];
     container.replaceChildren();
-    if (!state.runs.length) { container.append(empty(msg("아직 평가 기록이 없습니다"), msg("모델 평가에서 예제를 불러와 첫 평가를 시작해보세요."))); return; }
+    if (!state.runs.length) { container.append(empty(msg("아직 평가 기록이 없습니다"), msg("모델 평가에서 생성 결과를 업로드해 첫 평가를 시작해보세요."))); return; }
     const table = node("table"), head = node("thead"), row = node("tr");
     [msg("평가 이름"), msg("대상"), msg("상태"), "Recall", msg("보기 검사 / 품질"), msg("최종 점수")].forEach(label => row.append(node("th", "", () => label))); head.append(row); table.append(head);
     const body = node("tbody");
@@ -617,13 +596,11 @@ function bindEvents() {
     });
   });
   $("#prediction-file").addEventListener("change", event => readFile(event.target.files[0]));
-  $("#prediction-text").addEventListener("input", () => { state.isSample = false; $("#demo-notice").hidden = true; });
   const drop = $("#dropzone");
   ["dragenter", "dragover"].forEach(name => drop.addEventListener(name, event => { event.preventDefault(); if (state.session?.can_manage) drop.classList.add("dragover"); }));
   ["dragleave", "drop"].forEach(name => drop.addEventListener(name, event => { event.preventDefault(); drop.classList.remove("dragover"); }));
   drop.addEventListener("drop", event => readFile(event.dataTransfer.files[0]));
   window.addEventListener("dragover", event => event.preventDefault()); window.addEventListener("drop", event => event.preventDefault());
-  $("#load-sample").addEventListener("click", loadSample);
   $("#evaluation-form").addEventListener("submit", submitEvaluation);
   $("#judge-button").addEventListener("click", startJudge);
   $("#skip-judge-button").addEventListener("click", skipJudge);

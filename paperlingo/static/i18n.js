@@ -100,7 +100,6 @@ const I18n = (() => {
       }
     });
     document.querySelectorAll("[data-language]").forEach(button => button.addEventListener("click", () => setLanguage(button.dataset.language)));
-    document.querySelectorAll('a[href="/api/schema"]').forEach(link => setAttribute(link, "href", () => `/api/schema?lang=${language}`));
     window.addEventListener("storage", event => {
       if (event.key === storageKey || event.key === null) setLanguage(valid(event.newValue) ? event.newValue : preferred(), false);
     });

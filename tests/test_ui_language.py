@@ -121,17 +121,18 @@ def test_saved_choice_and_cross_tab_changes_do_not_reload_or_reset_inputs(page, 
     pw.expect(other.locator("html")).to_have_attribute("lang", "ko")
     language(other, "en")
     pw.expect(page.locator("html")).to_have_attribute("lang", "en")
-    pw.expect(page.locator('#page-method a[href="/api/schema?lang=en"]')).to_have_count(1)
+    pw.expect(page.locator("#page-method")).to_contain_text("Submission format")
+    pw.expect(page.locator('#page-method a[href^="/api/schema"]')).to_have_count(0)
 
 
 def test_results_checks_filters_and_raw_options_survive_switching(page):
-    page.locator("#load-sample").click()
-    pw.expect(page.locator("#prediction-text")).not_to_have_value("")
-    predictions = [json.loads(line) for line in page.locator("#prediction-text").input_value().splitlines()]
+    pw.expect(page.locator("#load-sample")).to_have_count(0)
+    predictions = page.request.get(page.url + "api/sample").json()["predictions"]
     question = predictions[0]["questions"][0]
     distractors = [i for i in range(4) if i != question["answer_id"]]
     question["options"][distractors[0]] = question["options"][question["answer_id"]]
     question["options"][distractors[1]] = "통과"
+    page.locator('[data-input-mode="paste"]').click()
     page.locator("#prediction-text").fill(json.dumps(predictions, ensure_ascii=False))
     page.locator("#run-name").fill("모델 평가")
     page.locator("#evaluate-button").click()
@@ -156,7 +157,11 @@ def test_results_checks_filters_and_raw_options_survive_switching(page):
 
 
 def test_report_keeps_secondary_metrics_collapsed_until_requested(page):
-    page.locator("#load-sample").click()
+    pw.expect(page.locator("#load-sample")).to_have_count(0)
+    pw.expect(page.locator("#download-json, #download-csv")).to_have_count(0)
+    sample = page.request.get(page.url + "api/sample").json()["predictions"]
+    page.locator('[data-input-mode="paste"]').click()
+    page.locator("#prediction-text").fill(json.dumps(sample, ensure_ascii=False))
     page.locator("#run-name").fill("metric layout")
     page.locator("#evaluate-button").click()
     pw.expect(page.locator("#report-section")).to_be_visible()
@@ -169,8 +174,10 @@ def test_report_keeps_secondary_metrics_collapsed_until_requested(page):
     assert secondary.evaluate("element => element.open") is False
     secondary.locator("summary").click()
     pw.expect(secondary).to_have_attribute("open", "")
-    pw.expect(secondary).to_contain_text("Precision")
-    pw.expect(secondary).to_contain_text("F1")
+    pw.expect(secondary.locator(".secondary-metric")).to_have_count(4)
+    for label in ("Overall question pass rate", "Code checks complete", "Precision", "F1"):
+        pw.expect(secondary).to_contain_text(label)
+    pw.expect(secondary).not_to_contain_text("Diagnostic")
     language(page, "ko")
     pw.expect(secondary.locator("summary")).to_have_text("보조 지표 숨기기")
     page.evaluate("renderReport()")
@@ -265,7 +272,10 @@ def test_data_guide_and_mobile_layout_keep_evaluation_answers_private(page):
     pw.expect(page.locator(".method-detail-grid")).to_be_visible()
     pw.expect(page.locator("#page-method")).to_contain_text("How is partial credit given?")
     page.locator(".schema-details > summary").click()
-    pw.expect(page.locator(".schema-code")).to_be_visible()
+    pw.expect(page.locator(".schema-code")).to_have_count(2)
+    pw.expect(page.locator(".schema-code").first).to_be_visible()
+    pw.expect(page.locator(".schema-code.jsonl")).to_be_visible()
+    pw.expect(page.locator(".schema-code.jsonl")).to_contain_text('"paper_id": "1109.3182"')
     text = page.locator("body").inner_text()
     for jargon in ("soft-rq", "exact-rq", "code-basic", "Qmatched", "PAPERLINGO / V1", "protocol v"):
         assert jargon not in text, jargon
@@ -274,19 +284,23 @@ def test_data_guide_and_mobile_layout_keep_evaluation_answers_private(page):
 
 
 def test_switching_during_a_request_restores_translated_button_text(page):
-    sample = page.request.get(page.url + "api/sample").json()
+    sample = page.request.get(page.url + "api/sample").json()["predictions"]
     pending = []
-    page.route("**/api/sample", lambda route: pending.append(route))
-    page.locator("#load-sample").click()
-    pw.expect(page.locator("#load-sample")).to_be_disabled()
+    page.route("**/api/runs", lambda route: pending.append(route) if route.request.method == "POST" else route.continue_())
+    page.locator("#run-name").fill("busy button")
+    page.locator('[data-input-mode="paste"]').click()
+    page.locator("#prediction-text").fill(json.dumps(sample, ensure_ascii=False))
+    page.locator("#evaluate-button").click()
+    pw.expect(page.locator("#evaluate-button")).to_be_disabled()
     language(page, "ko")
-    pw.expect(page.locator("#load-sample")).to_contain_text("불러오는 중")
+    pw.expect(page.locator("#evaluate-button")).to_contain_text("표현 채점 중")
     assert pending
-    pending[0].fulfill(json=sample)
-    pw.expect(page.locator("#load-sample")).to_be_enabled()
-    pw.expect(page.locator("#load-sample")).to_contain_text("예제 불러오기")
+    pending[0].fulfill(response=pending[0].fetch())
+    pw.expect(page.locator("#evaluate-button")).to_be_enabled()
+    pw.expect(page.locator("#evaluate-button")).to_contain_text("평가 시작")
+    pw.expect(page.locator("#report-section")).to_be_visible()
     language(page, "en")
-    pw.expect(page.locator("#load-sample")).to_contain_text("Load example")
+    pw.expect(page.locator("#evaluate-button")).to_contain_text("Start evaluation")
 
 
 def test_example_downloads_and_submission_score_full_marks_in_both_languages(page, tmp_path):
@@ -333,16 +347,17 @@ def test_storage_denied_still_allows_switching(browser, web_url):
     page.goto(web_url, wait_until="networkidle")
     pw.expect(page.locator("html")).to_have_attribute("lang", "ko")
     language(page, "en")
-    pw.expect(page.locator("#load-sample")).to_contain_text("Load example")
+    pw.expect(page.locator("#evaluate-button")).to_contain_text("Start evaluation")
     context.close()
     assert not errors
 
 
-def test_upload_after_example_load_uses_file_ids_without_a_scope_selector(page):
+def test_upload_replaces_pasted_text_and_uses_file_ids_without_a_scope_selector(page):
     pw.expect(page.locator("#evaluation-form select")).to_have_count(0)
-    page.locator("#load-sample").click()
+    sample_text = json.dumps(page.request.get(page.url + "api/sample").json()["predictions"])
+    page.locator('[data-input-mode="paste"]').click()
+    page.locator("#prediction-text").fill(sample_text)
     pw.expect(page.locator("#prediction-text")).not_to_have_value("")
-    sample_text = page.locator("#prediction-text").input_value()
     evaluation_id = page.request.get(page.url + "api/papers?scope=evaluation&limit=1").json()["items"][0]["paper_id"]
     prediction = json.dumps({"paper_id": evaluation_id, "questions": []})
     page.locator("#prediction-file").set_input_files({
